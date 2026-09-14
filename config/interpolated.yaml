@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    maxlen: 100.0
+    minlen: 0.0
+    pcTopic: /velodyne_points
+    x_resolution: 0.25
+    y_interpolation: 4
+    ang_Y_resolution: 2.05
+    ang_ground: 0.0
+    max_var: 5.0
+    filter_output_pc: true
+    output_cloud_topic: /pc_interpoled
+    output_image_topic: /pc2imageInterpol
