@@ -36,8 +36,6 @@ inline double deg_to_rad(double degrees)
 //   col = 0       -> -pi (rear seam)
 //   col = cols/2  ->  0   (forward +X)
 //   increasing col follows increasing atan2(y, x).
-// Nearest-bin assignment makes the forward direction land exactly at cols/2
-// for the normal even widths used by this package.
 inline int azimuth_to_column(double azimuth, int cols)
 {
   const double scaled = azimuth * static_cast<double>(cols) / (2.0 * pi);
@@ -120,8 +118,26 @@ Result interpolate(
   result.interpolated_ranges.assign(
     static_cast<std::size_t>(result.interpolated_rows) * result.cols, nan_f);
 
+  // Keep the physical ring calibration separate from image row numbering.
+  // Image convention is conventional image coordinates:
+  //   row 0              = highest elevation
+  //   row input_rows - 1 = lowest elevation
+  std::vector<std::pair<double, int>> rings_ascending;
+  rings_ascending.reserve(s.input_rows);
+  for (int ring = 0; ring < s.input_rows; ++ring)
+    rings_ascending.emplace_back(s.vertical_angles_deg[ring], ring);
+  std::sort(rings_ascending.begin(), rings_ascending.end(),
+    [](const auto & a, const auto & b) {return a.first < b.first;});
+
+  std::vector<int> ring_to_image_row(static_cast<std::size_t>(s.input_rows));
+  for (int image_row = 0; image_row < s.input_rows; ++image_row) {
+    const int ascending_index = s.input_rows - 1 - image_row;
+    const int ring = rings_ascending[static_cast<std::size_t>(ascending_index)].second;
+    ring_to_image_row[static_cast<std::size_t>(ring)] = image_row;
+  }
+
   // Build a fixed HxW raw range image directly from ring and azimuth.
-  // The forward LiDAR axis (+X, atan2=0) is always the horizontal image centre.
+  // Horizontal centre is forward +X; vertical top is the highest laser ring.
   for (const auto & p : input) {
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
     if (p.ring >= static_cast<std::uint16_t>(s.input_rows)) continue;
@@ -134,42 +150,36 @@ Result interpolate(
 
     const double azimuth = std::atan2(static_cast<double>(p.y), static_cast<double>(p.x));
     const int col = azimuth_to_column(azimuth, result.cols);
+    const int row = ring_to_image_row[static_cast<std::size_t>(p.ring)];
 
-    const std::size_t idx = index_of(static_cast<int>(p.ring), col, result.cols);
+    const std::size_t idx = index_of(row, col, result.cols);
     const float range_f = static_cast<float>(range);
     if (!valid_range(result.raw_ranges[idx]) || range_f < result.raw_ranges[idx])
       result.raw_ranges[idx] = range_f;
   }
 
-  // Sort physical ring elevations while retaining the incoming ring index.
-  std::vector<std::pair<double, int>> rings;
-  rings.reserve(s.input_rows);
-  for (int ring = 0; ring < s.input_rows; ++ring)
-    rings.emplace_back(s.vertical_angles_deg[ring], ring);
-  std::sort(rings.begin(), rings.end(),
-    [](const auto & a, const auto & b) {return a.first < b.first;});
-
-  const double min_elevation = rings.front().first;
-  const double max_elevation = rings.back().first;
+  const double min_elevation = rings_ascending.front().first;
+  const double max_elevation = rings_ascending.back().first;
   const double dense_step = (max_elevation - min_elevation) /
     static_cast<double>(s.output_rows - 1);
 
-  // Vertical interpolation only. Horizontal bins remain unchanged.
+  // Vertical interpolation only. Dense row 0 is the highest target elevation
+  // and the last row is the lowest target elevation.
   for (int out_row = 0; out_row < s.output_rows; ++out_row) {
-    const double target_elevation = min_elevation + dense_step * out_row;
+    const double target_elevation = max_elevation - dense_step * out_row;
 
     auto upper = std::lower_bound(
-      rings.begin(), rings.end(), target_elevation,
+      rings_ascending.begin(), rings_ascending.end(), target_elevation,
       [](const auto & entry, double value) {return entry.first < value;});
 
     int lower_ring = -1;
     int upper_ring = -1;
     double alpha = 0.0;
 
-    if (upper == rings.begin()) {
+    if (upper == rings_ascending.begin()) {
       lower_ring = upper_ring = upper->second;
-    } else if (upper == rings.end()) {
-      lower_ring = upper_ring = rings.back().second;
+    } else if (upper == rings_ascending.end()) {
+      lower_ring = upper_ring = rings_ascending.back().second;
     } else if (std::abs(upper->first - target_elevation) < 1e-12) {
       lower_ring = upper_ring = upper->second;
     } else {
@@ -180,13 +190,15 @@ Result interpolate(
     }
 
     for (int col = 0; col < result.cols; ++col) {
-      const float r0 = result.raw_ranges[index_of(lower_ring, col, result.cols)];
+      const int lower_row = ring_to_image_row[static_cast<std::size_t>(lower_ring)];
+      const int upper_row = ring_to_image_row[static_cast<std::size_t>(upper_ring)];
+      const float r0 = result.raw_ranges[index_of(lower_row, col, result.cols)];
       float dense = nan_f;
 
       if (lower_ring == upper_ring) {
         if (valid_range(r0)) dense = r0;
       } else {
-        const float r1 = result.raw_ranges[index_of(upper_ring, col, result.cols)];
+        const float r1 = result.raw_ranges[index_of(upper_row, col, result.cols)];
         if (valid_range(r0) && valid_range(r1) &&
             std::abs(static_cast<double>(r1) - r0) <= s.max_interpolation_range_gap_m) {
           dense = static_cast<float>((1.0 - alpha) * r0 + alpha * r1);
@@ -204,10 +216,9 @@ Result interpolate(
     0.0F,             1.0F, 0.0F,
    -std::sin(ground), 0.0F, std::cos(ground);
 
-  // Reconstruct XYZ directly from (range, elevation, azimuth) using the same
-  // centred horizontal convention used while constructing the range image.
+  // Reconstruct XYZ using the same top-to-bottom elevation convention.
   for (int row = 0; row < s.output_rows; ++row) {
-    const double elevation_deg = min_elevation + dense_step * row;
+    const double elevation_deg = max_elevation - dense_step * row;
     const double elevation = deg_to_rad(elevation_deg);
     const double cos_elevation = std::cos(elevation);
     const double sin_elevation = std::sin(elevation);
