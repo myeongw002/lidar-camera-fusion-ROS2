@@ -1,31 +1,35 @@
 /**:
   ros__parameters:
     matrix_file:
-      # Upstream projection matrix; [2,2] must remain +1.0.
+      # Camera projection matrix P from camera_info (1280x720).
       camera_matrix:
-      - 915.828857
+      - 633.8698120117188
       - 0.0
-      - 644.015094
+      - 635.5365600585938
       - 0.0
       - 0.0
-      - 925.069885
-      - 372.912666
+      - 633.1943359375
+      - 358.7809143066406
       - 0.0
       - 0.0
       - 0.0
       - 1.0
       - 0.0
+
+      # Direct LiDAR -> camera_color_optical_frame extrinsic rotation.
       rlc:
-      - 0.999715
-      - -0.00610437
-      - 0.023068
-      - 0.0113064
-      - 0.972496
-      - -0.232646
-      - -0.0210134
-      - 0.23284
-      - 0.972288
+      - -0.12360466
+      - -0.99233162
+      - 0.0
+      - 0.0
+      - 0.0
+      - -1.0
+      - 0.99233162
+      - -0.12360460
+      - 0.0
+
+      # Direct LiDAR -> camera_color_optical_frame extrinsic translation [m].
       tlc:
-      - -0.0549389263
-      - -0.059792
-      - 0.12
+      - -0.01
+      - 0.10
+      - -0.09
