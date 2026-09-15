@@ -148,6 +148,22 @@ private:
     const double y = static_cast<double>(camera_point.y()) / camera_point.z();
     if (!std::isfinite(x) || !std::isfinite(y)) return false;
 
+    // Gate points using the undistorted pinhole frustum before evaluating the
+    // distortion polynomial. This prevents far off-axis points from the 360-deg
+    // LiDAR cloud from being folded back into the image by high-order terms.
+    const double u_pinhole =
+      camera_intrinsics_(0, 0) * x +
+      camera_intrinsics_(0, 1) * y +
+      camera_intrinsics_(0, 2);
+    const double v_pinhole =
+      camera_intrinsics_(1, 0) * x +
+      camera_intrinsics_(1, 1) * y +
+      camera_intrinsics_(1, 2);
+    if (!std::isfinite(u_pinhole) || !std::isfinite(v_pinhole) ||
+        u_pinhole < 0.0 || v_pinhole < 0.0 ||
+        u_pinhole >= image_width || v_pinhole >= image_height)
+      return false;
+
     // ROS plumb_bob / Brown-Conrady model:
     // D = [k1, k2, p1, p2, k3].
     const double k1 = distortion_(0);
