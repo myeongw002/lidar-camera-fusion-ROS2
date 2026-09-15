@@ -13,6 +13,25 @@ import yaml
 share = Path(get_package_share_directory('lidar_camera_fusion'))
 bin_dir = Path(get_package_prefix('lidar_camera_fusion')) / 'lib/lidar_camera_fusion'
 calibration = ['--params-file', str(share / 'config/calibration.yaml')]
+
+
+def check_calibration_regression():
+    values = yaml.safe_load((share / 'config/calibration.yaml').read_text())
+    matrix_file = values['/**']['ros__parameters']['matrix_file']
+    camera = matrix_file['camera_matrix']
+    rotation = matrix_file['rlc']
+    translation = matrix_file['tlc']
+    assert len(camera) == 12 and camera[10] == 1.0, 'camera projection [2,2] must be +1.0'
+    # Known forward LiDAR point: [-y, -z, x, 1] = [0, 0, 10, 1].
+    camera_xyz = [rotation[row * 3 + 2] * 10.0 + translation[row] for row in range(3)]
+    projected = [sum(camera[row * 4 + col] * (camera_xyz + [1.0])[col]
+                     for col in range(4)) for row in range(3)]
+    assert projected[2] > 0.0, 'forward LiDAR point must have positive camera depth'
+    u, v = projected[0] / projected[2], projected[1] / projected[2]
+    assert 0.0 <= u < 1280.0 and 0.0 <= v < 720.0, (u, v)
+
+
+check_calibration_regression()
 cases = [
     ('interpolated_node', ['-p', 'x_resolution:=0.0'], 'x_resolution'),
     ('interpolated_node', ['-p', 'ang_Y_resolution:=-1.0'], 'ang_Y_resolution'),
@@ -72,3 +91,13 @@ def check_classes(value):
 for path in (share / 'rviz').glob('*.rviz'):
     check_classes(yaml.safe_load(path.read_text()))
 print('RViz YAML parsed; configured classes match installed Humble plugins/built-in panels')
+
+
+def test_calibration_projection_regression():
+    check_calibration_regression()
+
+
+def test_startup_validation_completed():
+    # Startup/launch/RViz checks above execute during pytest collection so any
+    # failure aborts this ament test. This marker gives the suite a test result.
+    assert True

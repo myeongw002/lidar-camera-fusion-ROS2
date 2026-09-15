@@ -37,10 +37,14 @@ def main():
         time.sleep(2)
         assert all(p.poll() is None for p in processes), 'node failed without data'
         messages = {}
+        message_counts = {}
         subscriptions = []
         for topic, kind in [('/pc_interpoled', PointCloud2), ('/pc2imageInterpol', Image),
                             ('/points2', PointCloud2), ('/pcOnImage_image', Image)]:
-            subscriptions.append(node.create_subscription(kind, topic, lambda msg, t=topic: messages.__setitem__(t, msg), 10))
+            def receive(msg, t=topic):
+                messages[t] = msg
+                message_counts[t] = message_counts.get(t, 0) + 1
+            subscriptions.append(node.create_subscription(kind, topic, receive, 10))
         pc_pub = node.create_publisher(PointCloud2, '/velodyne_points', qos_profile_sensor_data)
         img_pub = node.create_publisher(Image, '/camera/color/image_raw', qos_profile_sensor_data)
         header = Header(frame_id='test_lidar')
@@ -63,14 +67,37 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.1)
         assert pc_pub.get_subscription_count() == 2, 'sensor QoS/discovery mismatch'
         # Empty and NaN clouds must not kill either node.
-        for values in [[], [(float('nan'), 0.0, 0.0)], [(1000.0, 0.0, 0.0)]]:
+        for values in [[], [(float('nan'), 0.0, 0.0)]]:
             bad = point_cloud2.create_cloud_xyz32(header, values)
             for _ in range(3):
                 pc_pub.publish(bad)
                 img_pub.publish(image)
                 rclpy.spin_once(node, timeout_sec=0.1)
+        # A valid but fully range-filtered frame must publish empty cloud frames,
+        # and fusion must publish the unchanged camera image with its header.
+        messages.clear()
+        counts_before = dict(message_counts)
+        unusable = point_cloud2.create_cloud_xyz32(header, [(1000.0, 0.0, 0.0)])
+        deadline = time.monotonic() + 5
+        required_empty = ['/pc_interpoled', '/points2', '/pcOnImage_image']
+        while any(message_counts.get(t, 0) == counts_before.get(t, 0) for t in required_empty) and time.monotonic() < deadline:
+            pc_pub.publish(unusable)
+            img_pub.publish(image)
+            rclpy.spin_once(node, timeout_sec=0.1)
+        assert messages['/pc_interpoled'].width == 0, 'interpolation dropped/nonempty unusable frame'
+        assert messages['/points2'].width == 0, 'fusion dropped/nonempty unusable frame'
+        assert messages['/pc_interpoled'].header == header and messages['/points2'].header == header
+        assert messages['/pcOnImage_image'].header == image.header
+        assert bytes(messages['/pcOnImage_image'].data) == bytes(image.data), 'empty fusion overlay changed'
+        messages.clear()
+        # Give the valid frame a distinct stamp so queued empty outputs cannot
+        # satisfy the valid-output assertions.
+        header.stamp.sec = 124
+        image.header.stamp.sec = 124
+        pc = point_cloud2.create_cloud_xyz32(header, points)
         deadline = time.monotonic() + 15
-        while len(messages) < 4 and time.monotonic() < deadline:
+        while (len(messages) < 4 or
+               any(msg.header.stamp.sec != 124 for msg in messages.values())) and time.monotonic() < deadline:
             pc_pub.publish(pc)
             img_pub.publish(image)
             rclpy.spin_once(node, timeout_sec=0.2)
@@ -109,4 +136,8 @@ def main():
 
 
 if __name__ == '__main__':
+    main()
+
+
+def test_ros_smoke():
     main()

@@ -46,5 +46,16 @@ if(BUILD_TESTING)
   add_executable(interpolation_test test/interpolation_test.cpp)
   target_link_libraries(interpolation_test interpolation)
   add_test(NAME interpolation_test COMMAND interpolation_test)
+
+  find_package(ament_cmake_pytest REQUIRED)
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/ros_test_logs")
+  ament_add_pytest_test(ros_smoke_test test/ros_smoke_test.py
+    TIMEOUT 60
+    ENV "ROS_DOMAIN_ID=187" "ROS_LOCALHOST_ONLY=1"
+      "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_test_logs")
+  ament_add_pytest_test(startup_test test/startup_test.py
+    TIMEOUT 90
+    ENV "ROS_DOMAIN_ID=188" "ROS_LOCALHOST_ONLY=1"
+      "ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/ros_test_logs")
 endif()
 ament_package()

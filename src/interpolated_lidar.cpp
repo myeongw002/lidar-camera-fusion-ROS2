@@ -28,14 +28,14 @@ private:
       pcl::PointCloud<pcl::PointXYZ> input;
       pcl::fromROSMsg(*msg, input);
       auto result = interpolate(input, range_image_, settings_, Mode::Interpolation);
-      if (result.ranges.is_empty() || result.cloud.empty()) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "No usable interpolated LiDAR points");
-        return;
-      }
       sensor_msgs::msg::PointCloud2 output;
       pcl::toROSMsg(result.cloud, output);
       output.header = msg->header;
       cloud_pub_->publish(output);
+      if (result.ranges.is_empty()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "No usable interpolated LiDAR points");
+        return;
+      }
       cv::Mat image(result.ranges.n_rows, result.ranges.n_cols, CV_16UC1);
       for (int i = 0; i < image.rows; ++i) {
         for (int j = 0; j < image.cols; ++j) {

@@ -17,7 +17,7 @@
   <depend>libpcl-all-dev</depend>
   <depend>libopencv-dev</depend>
   <depend>eigen</depend>
-  <depend>libarmadillo-dev</depend>
+  <depend>armadillo</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
@@ -25,5 +25,6 @@
   <test_depend>rclpy</test_depend>
   <test_depend>sensor_msgs_py</test_depend>
   <test_depend>python3-yaml</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
   <export><build_type>ament_cmake</build_type></export>
 </package>

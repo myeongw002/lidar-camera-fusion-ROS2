@@ -1,6 +1,7 @@
 /**:
   ros__parameters:
     matrix_file:
+      # Upstream projection matrix; [2,2] must remain +1.0.
       camera_matrix:
       - 915.828857
       - 0.0

@@ -58,10 +58,6 @@ private:
       pcl::PointCloud<pcl::PointXYZ> input;
       pcl::fromROSMsg(*cloud, input);  // Intensity was unused by the upstream algorithm.
       const auto result = interpolate(input, range_image_, settings_, Mode::Fusion);
-      if (result.ranges.is_empty() || result.cloud.empty()) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "No usable LiDAR points in camera FOV");
-        return;
-      }
       pcl::PointCloud<pcl::PointXYZRGB> colored;
       for (const auto & p : result.cloud) {
         const Eigen::Vector4f remapped(-p.y, -p.z, p.x, 1.0f);
@@ -90,6 +86,9 @@ private:
       output.header = cloud->header;
       cloud_pub_->publish(output);
       image_pub_->publish(*cv_bridge::CvImage(image->header, "bgr8", overlay).toImageMsg());
+      if (result.cloud.empty()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "No usable LiDAR points in camera FOV");
+      }
     } catch (const std::exception & e) {
       RCLCPP_ERROR(get_logger(), "Fusion processing failed: %s", e.what());
     }

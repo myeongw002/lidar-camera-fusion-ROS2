@@ -58,6 +58,8 @@ Launch arguments include `params_file`, `use_sim_time`, and (fusion only) `calib
 
 Inputs use best-effort, volatile sensor-data QoS. Fusion uses ApproximateTime with `sync_queue_size: 10`; sensor timestamps must share a clock. Outputs are reliable and volatile. Clouds and range images carry the LiDAR input stamp/frame; overlays carry the camera header. Ground correction is applied to coordinates as upstream; no TF is generated.
 
+For a valid callback whose LiDAR cloud has no usable points, each node publishes an empty PointCloud2 with the LiDAR header. Fusion also publishes the unchanged camera image with its original header. The interpolation node omits the range image only when no usable range-image dimensions exist.
+
 The filter subscribers use the [Humble Subscriber QoS API](https://docs.ros.org/en/ros2_packages/humble/api/message_filters/generated/classmessage__filters_1_1SubscriberBase.html).
 
 ## Parameters and calibration
@@ -66,7 +68,7 @@ Parameters are node-local, declared and read-only after startup. Edit the YAML o
 
 `config/interpolated.yaml`, `fusion.yaml`, and `fusion_offline.yaml` retain their upstream launch defaults. Fusion now honors `ang_ground`; its default remains the actual upstream hard-coded 0.6 degrees, including offline mode (where upstream ignored a zero-valued launch parameter).
 
-`config/calibration.yaml` retains all upstream values. Under `matrix_file`, `tlc` has 3 doubles, `rlc` has 9 row-major doubles, and `camera_matrix` has 12 row-major doubles. Fusion requires these arrays at startup and rejects missing, malformed, or nonfinite values:
+`config/calibration.yaml` retains all upstream values, including `camera_matrix[2,2] = +1.0`. Under `matrix_file`, `tlc` has 3 doubles, `rlc` has 9 row-major doubles, and `camera_matrix` has 12 row-major doubles. Fusion requires these arrays at startup and rejects missing, malformed, or nonfinite values:
 
 ```bash
 ros2 run lidar_camera_fusion lidar_camera_node --ros-args \
@@ -89,4 +91,4 @@ colcon test --packages-select lidar_camera_fusion
 colcon test-result --verbose
 ```
 
-The C++ test checks synthetic rings, densification, range preservation, FOV, ground correction, empty/nonfinite inputs, filtering and invalid settings. See `VALIDATION.md` for commands and actual local build/runtime results. Real hardware alignment and ROS1 bag replay are not claimed.
+Normal `colcon test` runs the C++ interpolation test and both Python runtime suites through `ament_cmake_pytest`. These cover synthetic rings, densification, range preservation, FOV, ground correction, empty/nonfinite inputs, empty output frames, filtering, parameter/calibration rejection, calibration projection depth, DDS/QoS, headers, RGB sampling, overlays, launch startup and RViz2 configuration. See `VALIDATION.md` for commands and actual local results. Real hardware alignment and ROS1 bag replay are not claimed.
