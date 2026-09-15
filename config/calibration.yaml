@@ -1,20 +1,25 @@
 /**:
   ros__parameters:
     matrix_file:
-      # Camera projection matrix P from camera_info (1280x720).
-      camera_matrix:
+      # Raw color-camera intrinsic matrix K from camera_info (1280x720).
+      camera_intrinsics:
       - 633.8698120117188
       - 0.0
       - 635.5365600585938
-      - 0.0
       - 0.0
       - 633.1943359375
       - 358.7809143066406
       - 0.0
       - 0.0
-      - 0.0
       - 1.0
-      - 0.0
+
+      # plumb_bob distortion coefficients D = [k1, k2, p1, p2, k3].
+      distortion_coefficients:
+      - -0.05849716067314148
+      - 0.07328697293996811
+      - -0.001119856140576303
+      - -0.00006413795927073807
+      - -0.023243652656674385
 
       # Direct LiDAR -> camera_color_optical_frame extrinsic rotation.
       rlc:
