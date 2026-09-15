@@ -2,7 +2,7 @@
 <package format="3">
   <name>lidar_camera_fusion</name>
   <version>1.0.0</version>
-  <description>Native ROS2 spherical LiDAR interpolation and calibrated camera fusion.</description>
+  <description>Native ROS2 fixed-ring LiDAR interpolation and calibrated camera fusion.</description>
   <maintainer email="edison.velasco@ua.es">epvs</maintainer>
   <license>GPL-3.0-only</license>
   <url type="repository">https://github.com/EPVelasco/lidar-camera-fusion</url>
@@ -17,7 +17,6 @@
   <depend>libpcl-all-dev</depend>
   <depend>libopencv-dev</depend>
   <depend>eigen</depend>
-  <depend>armadillo</depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
