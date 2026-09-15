@@ -87,8 +87,11 @@ private:
       for (const auto & p : dense_cloud) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
-        const Eigen::Vector4f remapped(-p.y, -p.z, p.x, 1.0f);
-        const Eigen::Vector3f projected = camera_ * (transform_ * remapped);
+        // The calibration extrinsic is interpreted directly as:
+        //   P_camera = T_lidar_to_camera * [x_lidar, y_lidar, z_lidar, 1]^T
+        // No implicit axis remapping is performed here.
+        const Eigen::Vector4f lidar_point(p.x, p.y, p.z, 1.0f);
+        const Eigen::Vector3f projected = camera_ * (transform_ * lidar_point);
         if (!projected.allFinite() || projected.z() <= 1e-6f) continue;
 
         const float u = projected.x() / projected.z();
