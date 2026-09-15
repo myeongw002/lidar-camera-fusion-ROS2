@@ -15,11 +15,20 @@ namespace lidar_camera_fusion
 namespace
 {
 constexpr float nan_f = std::numeric_limits<float>::quiet_NaN();
+constexpr int directional_search_radius_cols = 3;
+constexpr double directional_offset_penalty_m = 0.05;
 
 inline std::size_t index_of(int row, int col, int cols)
 {
   return static_cast<std::size_t>(row) * static_cast<std::size_t>(cols) +
          static_cast<std::size_t>(col);
+}
+
+inline int wrap_column(int col, int cols)
+{
+  col %= cols;
+  if (col < 0) col += cols;
+  return col;
 }
 
 inline bool valid_range(float value)
@@ -163,8 +172,12 @@ Result interpolate(
   const double dense_step = (max_elevation - min_elevation) /
     static_cast<double>(s.output_rows - 1);
 
-  // Vertical interpolation only. Dense row 0 is the highest target elevation
-  // and the last row is the lowest target elevation.
+  // Directional edge-aware vertical interpolation. For a target cell between
+  // two physical rings, evaluate the vertical support and a small set of
+  // diagonal supports. The candidate with the smallest range discontinuity is
+  // selected, with a small penalty for horizontal displacement so that smooth
+  // interior surfaces still prefer the vertical direction. Candidates that
+  // cross a depth jump larger than max_interpolation_range_gap_m are rejected.
   for (int out_row = 0; out_row < s.output_rows; ++out_row) {
     const double target_elevation = max_elevation - dense_step * out_row;
 
@@ -189,19 +202,41 @@ Result interpolate(
       alpha = (target_elevation - lower->first) / (upper->first - lower->first);
     }
 
+    const int lower_row = ring_to_image_row[static_cast<std::size_t>(lower_ring)];
+    const int upper_row = ring_to_image_row[static_cast<std::size_t>(upper_ring)];
+
     for (int col = 0; col < result.cols; ++col) {
-      const int lower_row = ring_to_image_row[static_cast<std::size_t>(lower_ring)];
-      const int upper_row = ring_to_image_row[static_cast<std::size_t>(upper_ring)];
-      const float r0 = result.raw_ranges[index_of(lower_row, col, result.cols)];
       float dense = nan_f;
 
       if (lower_ring == upper_ring) {
-        if (valid_range(r0)) dense = r0;
+        const float raw = result.raw_ranges[index_of(lower_row, col, result.cols)];
+        if (valid_range(raw)) dense = raw;
       } else {
-        const float r1 = result.raw_ranges[index_of(upper_row, col, result.cols)];
-        if (valid_range(r0) && valid_range(r1) &&
-            std::abs(static_cast<double>(r1) - r0) <= s.max_interpolation_range_gap_m) {
-          dense = static_cast<float>((1.0 - alpha) * r0 + alpha * r1);
+        double best_score = std::numeric_limits<double>::infinity();
+
+        for (int direction = -directional_search_radius_cols;
+          direction <= directional_search_radius_cols; ++direction)
+        {
+          // Choose integer support columns that approximate a line passing
+          // through the target column at interpolation fraction alpha.
+          const int lower_col = wrap_column(
+            col - static_cast<int>(std::lround(alpha * direction)), result.cols);
+          const int upper_col = wrap_column(
+            col + static_cast<int>(std::lround((1.0 - alpha) * direction)), result.cols);
+
+          const float r0 = result.raw_ranges[index_of(lower_row, lower_col, result.cols)];
+          const float r1 = result.raw_ranges[index_of(upper_row, upper_col, result.cols)];
+          if (!valid_range(r0) || !valid_range(r1)) continue;
+
+          const double gap = std::abs(static_cast<double>(r1) - r0);
+          if (gap > s.max_interpolation_range_gap_m) continue;
+
+          const double score = gap +
+            directional_offset_penalty_m * static_cast<double>(std::abs(direction));
+          if (score < best_score) {
+            best_score = score;
+            dense = static_cast<float>((1.0 - alpha) * r0 + alpha * r1);
+          }
         }
       }
 
