@@ -1,13 +1,17 @@
-// Native ROS2 Humble LiDAR-camera fusion using fixed ring range images.
+// Native ROS2 Humble LiDAR-camera fusion consuming the interpolated cloud.
 #include "node_parameters.hpp"
-#include "pointcloud_utils.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <opencv2/imgproc.hpp>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -21,7 +25,7 @@ class LidarCameraNode : public rclcpp::Node
   using Policy = message_filters::sync_policies::ApproximateTime<Cloud, Image>;
 
 public:
-  LidarCameraNode() : Node("lidar_camera_node"), settings_(read_settings(*this))
+  LidarCameraNode() : Node("lidar_camera_node")
   {
     const auto translation = calibration(*this, "matrix_file.tlc", 3);
     const auto rotation = calibration(*this, "matrix_file.rlc", 9);
@@ -40,17 +44,17 @@ public:
     if (queue <= 0 || queue > std::numeric_limits<int>::max())
       throw std::invalid_argument("sync_queue_size must be a positive int32 integer");
 
+    overlay_max_range_m_ = parameter<double>(*this, "overlay_max_range_m", 20.0);
+    if (!std::isfinite(overlay_max_range_m_) || overlay_max_range_m_ <= 0.0)
+      throw std::invalid_argument("overlay_max_range_m must be finite and > 0");
+
     cloud_pub_ = create_publisher<Cloud>(
       topic(*this, "output_cloud_topic", "/points2"), 1);
     image_pub_ = create_publisher<Image>(
       topic(*this, "output_image_topic", "/pcOnImage_image"), 1);
-    raw_range_pub_ = create_publisher<Image>(
-      topic(*this, "raw_range_image_topic", "/range_image_raw"), 1);
-    interpolated_range_pub_ = create_publisher<Image>(
-      topic(*this, "interpolated_range_image_topic", "/range_image_interpolated"), 1);
 
     const auto qos = rclcpp::SensorDataQoS().get_rmw_qos_profile();
-    cloud_sub_.subscribe(this, topic(*this, "pcTopic", "/velodyne_points"), qos);
+    cloud_sub_.subscribe(this, topic(*this, "pcTopic", "/pc_interpoled"), qos);
     image_sub_.subscribe(this, topic(*this, "imgTopic", "/camera/color/image_raw"), qos);
     sync_ = std::make_shared<message_filters::Synchronizer<Policy>>(
       Policy(static_cast<uint32_t>(queue)), cloud_sub_, image_sub_);
@@ -58,22 +62,10 @@ public:
       &LidarCameraNode::callback, this, std::placeholders::_1, std::placeholders::_2));
 
     RCLCPP_INFO(
-      get_logger(),
-      "Waiting for synchronized LiDAR/camera; raw range image %dx%d -> interpolated %dx%d",
-      settings_.input_rows, settings_.horizontal_columns(),
-      settings_.output_rows, settings_.horizontal_columns());
+      get_logger(), "Waiting for synchronized interpolated LiDAR cloud and camera image");
   }
 
 private:
-  void publish_range_image(
-    const std::vector<float> & values, int rows, int cols,
-    const std_msgs::msg::Header & header,
-    const rclcpp::Publisher<Image>::SharedPtr & publisher)
-  {
-    cv::Mat image(rows, cols, CV_32FC1, const_cast<float *>(values.data()));
-    publisher->publish(*cv_bridge::CvImage(header, "32FC1", image).toImageMsg());
-  }
-
   void callback(const Cloud::ConstSharedPtr & cloud, const Image::ConstSharedPtr & image)
   {
     try {
@@ -83,20 +75,18 @@ private:
         return;
       }
 
+      pcl::PointCloud<pcl::PointXYZ> dense_cloud;
+      pcl::fromROSMsg(*cloud, dense_cloud);
+
       cv::Mat overlay = colors->image.clone();
-      const auto input = ring_points_from_ros(*cloud);
-      const auto result = interpolate(input, settings_, Mode::Fusion);
-
-      publish_range_image(
-        result.raw_ranges, result.raw_rows, result.cols, cloud->header, raw_range_pub_);
-      publish_range_image(
-        result.interpolated_ranges, result.interpolated_rows, result.cols,
-        cloud->header, interpolated_range_pub_);
-
       pcl::PointCloud<pcl::PointXYZRGB> colored;
-      colored.reserve(result.cloud.size());
+      colored.reserve(dense_cloud.size());
 
-      for (const auto & p : result.cloud) {
+      for (const auto & p : dense_cloud) {
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
+
+        // Preserve the upstream LiDAR-axis to camera-axis remap before applying
+        // the calibrated LiDAR-to-camera rigid transform.
         const Eigen::Vector4f remapped(-p.y, -p.z, p.x, 1.0f);
         const Eigen::Vector3f projected = camera_ * (transform_ * remapped);
         if (!projected.allFinite() || projected.z() <= 1e-6f) continue;
@@ -120,13 +110,15 @@ private:
         point.b = color[0];
         colored.push_back(point);
 
-        const int distance_x = static_cast<int>(std::clamp(
-          255.0 * p.x / settings_.maxlen, 0.0, 255.0));
-        const int distance_z = static_cast<int>(std::clamp(
-          255.0 * p.x / 10.0, 0.0, 255.0));
+        const double range = std::sqrt(
+          static_cast<double>(p.x) * p.x +
+          static_cast<double>(p.y) * p.y +
+          static_cast<double>(p.z) * p.z);
+        const int distance_color = static_cast<int>(std::clamp(
+          255.0 * range / overlay_max_range_m_, 0.0, 255.0));
         cv::circle(
           overlay, cv::Point(px, py), 1,
-          cv::Scalar(distance_x, distance_z, 255 - distance_x), cv::FILLED);
+          cv::Scalar(distance_color, 255 - distance_color, 255), cv::FILLED);
       }
 
       colored.is_dense = true;
@@ -139,23 +131,21 @@ private:
       cloud_pub_->publish(output);
       image_pub_->publish(*cv_bridge::CvImage(image->header, "bgr8", overlay).toImageMsg());
 
-      if (result.cloud.empty())
+      if (dense_cloud.empty())
         RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000, "No usable LiDAR points in camera FOV");
+          get_logger(), *get_clock(), 5000, "Interpolated LiDAR cloud is empty");
     } catch (const std::exception & e) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 5000, "Fusion processing failed: %s", e.what());
     }
   }
 
-  Settings settings_;
+  double overlay_max_range_m_ = 20.0;
   Eigen::Matrix4f transform_;
   Eigen::Matrix<float, 3, 4> camera_;
 
   rclcpp::Publisher<Cloud>::SharedPtr cloud_pub_;
   rclcpp::Publisher<Image>::SharedPtr image_pub_;
-  rclcpp::Publisher<Image>::SharedPtr raw_range_pub_;
-  rclcpp::Publisher<Image>::SharedPtr interpolated_range_pub_;
   message_filters::Subscriber<Cloud> cloud_sub_;
   message_filters::Subscriber<Image> image_sub_;
   std::shared_ptr<message_filters::Synchronizer<Policy>> sync_;
