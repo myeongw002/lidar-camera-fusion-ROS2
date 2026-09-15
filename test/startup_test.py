@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check startup validation and the three installed headless launches."""
+"""Check startup validation and installed headless launches."""
 from pathlib import Path
 import signal
 import subprocess
@@ -22,7 +22,6 @@ def check_calibration_regression():
     rotation = matrix_file['rlc']
     translation = matrix_file['tlc']
     assert len(camera) == 12 and camera[10] == 1.0, 'camera projection [2,2] must be +1.0'
-    # Known forward LiDAR point: [-y, -z, x, 1] = [0, 0, 10, 1].
     camera_xyz = [rotation[row * 3 + 2] * 10.0 + translation[row] for row in range(3)]
     projected = [sum(camera[row * 4 + col] * (camera_xyz + [1.0])[col]
                      for col in range(4)) for row in range(3)]
@@ -31,26 +30,43 @@ def check_calibration_regression():
     assert 0.0 <= u < 1280.0 and 0.0 <= v < 720.0, (u, v)
 
 
+def check_range_image_config():
+    values = yaml.safe_load((share / 'config/interpolated.yaml').read_text())
+    params = values['/**']['ros__parameters']
+    assert params['input_rows'] == 16
+    assert params['output_rows'] == 64
+    assert len(params['vertical_angles_deg']) == 16
+    assert params['horizontal_resolution_deg'] > 0.0
+    expected_width = round(360.0 / params['horizontal_resolution_deg'])
+    assert expected_width > 0
+
+
 check_calibration_regression()
+check_range_image_config()
+
 cases = [
-    ('interpolated_node', ['-p', 'x_resolution:=0.0'], 'x_resolution'),
-    ('interpolated_node', ['-p', 'ang_Y_resolution:=-1.0'], 'ang_Y_resolution'),
-    ('interpolated_node', ['-p', 'y_interpolation:=0'], 'y_interpolation'),
-    ('interpolated_node', ['-p', 'y_interpolation:=2.5'], 'y_interpolation'),
+    ('interpolated_node', ['-p', 'horizontal_resolution_deg:=0.0'], 'horizontal_resolution_deg'),
+    ('interpolated_node', ['-p', 'input_rows:=1'], 'input_rows'),
+    ('interpolated_node', ['-p', 'output_rows:=1'], 'output_rows'),
+    ('interpolated_node', ['-p', 'vertical_angles_deg:=[-1.0,1.0]'], 'vertical_angles_deg'),
+    ('interpolated_node', ['-p', 'max_interpolation_range_gap_m:=-1.0'], 'max_interpolation_range_gap_m'),
     ('interpolated_node', ['-p', 'maxlen:=0.0'], 'maxlen'),
     ('interpolated_node', ['-p', 'min_ang_FOV:=3.0', '-p', 'max_ang_FOV:=1.0'], 'FOV'),
-    ('interpolated_node', ['-p', 'max_var:=-1.0'], 'max_var'),
     ('lidar_camera_node', calibration + ['-p', 'sync_queue_size:=0'], 'sync_queue_size'),
     ('lidar_camera_node', [], 'matrix_file.tlc'),
-    ('lidar_camera_node', calibration + ['-p', 'matrix_file.tlc:=[0.0, 1.0]'], 'exactly 3'),
+    ('lidar_camera_node', calibration + ['-p', 'matrix_file.tlc:=[0.0,1.0]'], 'exactly 3'),
     ('lidar_camera_node', calibration + ['-p', 'matrix_file.rlc:=[1.0]'], 'exactly 9'),
     ('lidar_camera_node', calibration + ['-p', 'matrix_file.camera_matrix:=[1.0]'], 'exactly 12'),
 ]
+
 for executable, args, expected in cases:
-    result = subprocess.run([str(bin_dir / executable), '--ros-args'] + args,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
-    assert result.returncode == 1 and expected in result.stdout, (args, result.returncode, result.stdout)
+    result = subprocess.run(
+        [str(bin_dir / executable), '--ros-args'] + args,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=10)
+    assert result.returncode == 1 and expected in result.stdout, (
+        args, result.returncode, result.stdout)
 print(f'{len(cases)} invalid-parameter/calibration startup checks passed')
+
 for launch in ['interpolated_vlp16', 'vlp16_on_img', 'vlp16_on_img_offline']:
     command = ['ros2', 'launch', 'lidar_camera_fusion', launch + '.launch.py']
     result = subprocess.run(command + ['--show-args'], capture_output=True, text=True, timeout=10)
@@ -67,8 +83,8 @@ for launch in ['interpolated_vlp16', 'vlp16_on_img', 'vlp16_on_img_offline']:
         output = log.read()
         assert 'Waiting for' in output and 'process has died' not in output, output
     print(f'{launch}: argument parsing, YAML load, idle startup and shutdown passed')
+
 # Validate RViz classes against installed plugin manifests without requiring a display.
-# rviz_common panels are built into RViz rather than pluginlib exports.
 default = yaml.safe_load((Path(get_package_share_directory('rviz_common')) / 'default.rviz').read_text())
 classes = {panel['Class'] for panel in default['Panels']}
 for package in ['rviz_common', 'rviz_default_plugins']:
@@ -79,6 +95,8 @@ for package in ['rviz_common', 'rviz_default_plugins']:
             continue
         for element in document.iter('class'):
             classes.add(element.attrib.get('name', ''))
+
+
 def check_classes(value):
     if isinstance(value, dict):
         if value.get('Class'):
@@ -88,6 +106,8 @@ def check_classes(value):
     elif isinstance(value, list):
         for v in value:
             check_classes(v)
+
+
 for path in (share / 'rviz').glob('*.rviz'):
     check_classes(yaml.safe_load(path.read_text()))
 print('RViz YAML parsed; configured classes match installed Humble plugins/built-in panels')
@@ -97,7 +117,9 @@ def test_calibration_projection_regression():
     check_calibration_regression()
 
 
+def test_range_image_configuration():
+    check_range_image_config()
+
+
 def test_startup_validation_completed():
-    # Startup/launch/RViz checks above execute during pytest collection so any
-    # failure aborts this ament test. This marker gives the suite a test result.
     assert True

@@ -1,17 +1,23 @@
 /**:
   ros__parameters:
     maxlen: 200.0
-    minlen: 0.0
+    minlen: 0.3
     pcTopic: /velodyne_points
-    x_resolution: 0.25
-    y_interpolation: 10
-    ang_Y_resolution: 2.05
+    imgTopic: /camera/color/image_raw
+
+    input_rows: 16
+    output_rows: 64
+    horizontal_resolution_deg: 0.2
+    vertical_angles_deg: [-15.0, -13.0, -11.0, -9.0, -7.0, -5.0, -3.0, -1.0,
+                           1.0,   3.0,   5.0,  7.0,  9.0, 11.0, 13.0, 15.0]
+    max_interpolation_range_gap_m: 2.0
+
     ang_ground: 0.010471975511965976
-    max_var: 100.0
-    filter_output_pc: false
-    output_cloud_topic: /points2
-    output_image_topic: /pcOnImage_image
     max_ang_FOV: 2.7
     min_ang_FOV: 0.5
-    imgTopic: /camera/color/image_raw
     sync_queue_size: 10
+
+    output_cloud_topic: /points2
+    output_image_topic: /pcOnImage_image
+    raw_range_image_topic: /range_image_raw
+    interpolated_range_image_topic: /range_image_interpolated

@@ -30,7 +30,7 @@ Visualization Manager:
     Enabled: true
     Topic:
       Value: /pc_interpoled
-      Reliability Policy: Best Effort
+      Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
       Depth: 5
@@ -39,11 +39,20 @@ Visualization Manager:
     Position Transformer: XYZ
     Color Transformer: AxisColor
   - Class: rviz_default_plugins/Image
-    Name: Range image
+    Name: Raw range image (32FC1 metres)
     Enabled: true
     Topic:
-      Value: /pc2imageInterpol
-      Reliability Policy: Best Effort
+      Value: /range_image_raw
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+  - Class: rviz_default_plugins/Image
+    Name: Interpolated range image (32FC1 metres)
+    Enabled: true
+    Topic:
+      Value: /range_image_interpolated
+      Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
       Depth: 5
