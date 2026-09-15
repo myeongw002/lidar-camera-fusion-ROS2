@@ -1,31 +1,70 @@
-// Adapted from EPVelasco/lidar-camera-fusion for ROS2 Humble (2026).
+// Fixed-size ring range-image interpolation for ROS2 Humble.
 #pragma once
-#include <armadillo>
+
+#include <cstdint>
+#include <vector>
+
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/range_image/range_image_spherical.h>
 
 namespace lidar_camera_fusion
 {
 constexpr double pi = 3.14159265358979323846;
-struct Settings
+
+struct RingPoint
 {
-  double maxlen = 100.0, minlen = 0.01;
-  double x_resolution = 0.5, ang_y_resolution = 2.1;
-  int interpolation = 20;
-  double ground_angle = 0.6 * pi / 180.0, max_var = 50.0;
-  bool filter = true;
-  double min_fov = 0.4, max_fov = 3.0;
-  void validate() const;
+  float x = 0.0F;
+  float y = 0.0F;
+  float z = 0.0F;
+  std::uint16_t ring = 0;
 };
 
-// Mode preserves the different variance statistics in the two upstream nodes.
+struct Settings
+{
+  double maxlen = 100.0;
+  double minlen = 0.01;
+
+  int input_rows = 16;
+  int output_rows = 64;
+  double horizontal_resolution_deg = 0.2;
+
+  // Angles are indexed by the incoming PointCloud2 ring value. The standard
+  // ROS Velodyne VLP-16 cloud uses elevation-sorted ring indices 0..15.
+  std::vector<double> vertical_angles_deg{
+    -15.0, -13.0, -11.0, -9.0, -7.0, -5.0, -3.0, -1.0,
+      1.0,   3.0,   5.0,  7.0,  9.0, 11.0, 13.0, 15.0};
+
+  // Interpolate only between two valid neighboring rings whose ranges are
+  // sufficiently similar. This prevents bridging obvious depth boundaries.
+  double max_interpolation_range_gap_m = 2.0;
+
+  // Preserve the existing optional ground correction and fusion FOV.
+  double ground_angle = 0.6 * pi / 180.0;
+  double min_fov = 0.4;
+  double max_fov = 3.0;
+
+  void validate() const;
+  int horizontal_columns() const;
+};
+
 enum class Mode { Interpolation, Fusion };
+
 struct Result
 {
-  arma::mat ranges;
+  int raw_rows = 0;
+  int interpolated_rows = 0;
+  int cols = 0;
+
+  // Row-major metric ranges in metres. Invalid cells are quiet NaN.
+  std::vector<float> raw_ranges;
+  std::vector<float> interpolated_ranges;
+
   pcl::PointCloud<pcl::PointXYZ> cloud;
 };
-Result interpolate(const pcl::PointCloud<pcl::PointXYZ> & input,
-  pcl::RangeImageSpherical & range_image, const Settings & settings, Mode mode);
+
+Result interpolate(
+  const std::vector<RingPoint> & input,
+  const Settings & settings,
+  Mode mode);
+
 }  // namespace lidar_camera_fusion
