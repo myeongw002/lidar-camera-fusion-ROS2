@@ -78,16 +78,34 @@ int main()
     require(std::isfinite(range) && std::abs(range - 10.0) < 1e-3, "XYZ range preservation");
   }
 
-  // Horizontal range-image convention: +X / 0 deg must map exactly to W/2.
   const int cols = s.horizontal_columns();
   const int center_col = cols / 2;
+
+  // Horizontal convention: +X / 0 deg must map exactly to W/2.
   std::vector<RingPoint> forward_only{
     RingPoint{10.0F, 0.0F, 0.0F, 7}};
   const auto centered = interpolate(forward_only, s, Mode::Interpolation);
-  require(std::isfinite(centered.raw_ranges[7u * cols + center_col]),
+  // ring 7 is -1 deg, so with top=highest it maps to image row 8.
+  require(std::isfinite(centered.raw_ranges[8u * cols + center_col]),
     "forward +X point must land at horizontal center");
-  require(!std::isfinite(centered.raw_ranges[7u * cols]),
+  require(!std::isfinite(centered.raw_ranges[8u * cols]),
     "forward +X point must not land at rear seam");
+
+  // Vertical convention: highest elevation at top, lowest at bottom.
+  std::vector<RingPoint> vertical_markers{
+    RingPoint{10.0F * std::cos(15.0 * pi / 180.0), 0.0F,
+              10.0F * std::sin(15.0 * pi / 180.0), 15},
+    RingPoint{10.0F * std::cos(-15.0 * pi / 180.0), 0.0F,
+              10.0F * std::sin(-15.0 * pi / 180.0), 0}};
+  const auto oriented = interpolate(vertical_markers, s, Mode::Interpolation);
+  require(std::isfinite(oriented.raw_ranges[0u * cols + center_col]),
+    "highest raw ring must be top row");
+  require(std::isfinite(oriented.raw_ranges[15u * cols + center_col]),
+    "lowest raw ring must be bottom row");
+  require(std::isfinite(oriented.interpolated_ranges[0u * cols + center_col]),
+    "highest dense elevation must be top row");
+  require(std::isfinite(oriented.interpolated_ranges[63u * cols + center_col]),
+    "lowest dense elevation must be bottom row");
 
   const auto fusion = interpolate(scan, s, Mode::Fusion);
   require(!fusion.cloud.empty() && fusion.cloud.size() < dense.cloud.size(), "camera FOV crop");
@@ -118,8 +136,8 @@ int main()
   auto collision = scan;
   collision.push_back(RingPoint{5.0F, 0.0F, 0.0F, 7});
   const auto collided = interpolate(collision, s, Mode::Interpolation);
-  require(std::isfinite(collided.raw_ranges[7u * cols + center_col]) &&
-    collided.raw_ranges[7u * cols + center_col] < 6.0F, "nearest return per cell");
+  require(std::isfinite(collided.raw_ranges[8u * cols + center_col]) &&
+    collided.raw_ranges[8u * cols + center_col] < 6.0F, "nearest return per cell");
 
   s.ground_angle = 0.1;
   const auto rotated = interpolate(scan, s, Mode::Interpolation);
