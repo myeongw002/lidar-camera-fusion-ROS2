@@ -31,6 +31,28 @@ inline double deg_to_rad(double degrees)
 {
   return degrees * pi / 180.0;
 }
+
+// Horizontal convention:
+//   col = 0       -> -pi (rear seam)
+//   col = cols/2  ->  0   (forward +X)
+//   increasing col follows increasing atan2(y, x).
+// Nearest-bin assignment makes the forward direction land exactly at cols/2
+// for the normal even widths used by this package.
+inline int azimuth_to_column(double azimuth, int cols)
+{
+  const double scaled = azimuth * static_cast<double>(cols) / (2.0 * pi);
+  long col = std::lround(scaled) + cols / 2;
+  col %= cols;
+  if (col < 0) col += cols;
+  return static_cast<int>(col);
+}
+
+inline double column_to_azimuth(int col, int cols)
+{
+  return 2.0 * pi *
+    (static_cast<double>(col) - static_cast<double>(cols / 2)) /
+    static_cast<double>(cols);
+}
 }  // namespace
 
 int Settings::horizontal_columns() const
@@ -51,7 +73,7 @@ void Settings::validate() const
     throw std::invalid_argument("horizontal_resolution_deg must be in (0, 360]");
 
   const int cols = horizontal_columns();
-  if (cols < 1 || cols > 1000000)
+  if (cols < 2 || cols > 1000000)
     throw std::invalid_argument("horizontal_resolution_deg produces an invalid range-image width");
 
   if (vertical_angles_deg.size() != static_cast<std::size_t>(input_rows))
@@ -99,6 +121,7 @@ Result interpolate(
     static_cast<std::size_t>(result.interpolated_rows) * result.cols, nan_f);
 
   // Build a fixed HxW raw range image directly from ring and azimuth.
+  // The forward LiDAR axis (+X, atan2=0) is always the horizontal image centre.
   for (const auto & p : input) {
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
     if (p.ring >= static_cast<std::uint16_t>(s.input_rows)) continue;
@@ -109,12 +132,8 @@ Result interpolate(
       static_cast<double>(p.z) * p.z);
     if (!std::isfinite(range) || range < s.minlen || range > s.maxlen || range <= 0.0) continue;
 
-    double azimuth = std::atan2(static_cast<double>(p.y), static_cast<double>(p.x));
-    if (azimuth < 0.0) azimuth += 2.0 * pi;  // [0, 2pi)
-
-    int col = static_cast<int>(std::floor(azimuth / (2.0 * pi) * result.cols));
-    if (col >= result.cols) col = 0;
-    if (col < 0) col = 0;
+    const double azimuth = std::atan2(static_cast<double>(p.y), static_cast<double>(p.x));
+    const int col = azimuth_to_column(azimuth, result.cols);
 
     const std::size_t idx = index_of(static_cast<int>(p.ring), col, result.cols);
     const float range_f = static_cast<float>(range);
@@ -185,7 +204,8 @@ Result interpolate(
     0.0F,             1.0F, 0.0F,
    -std::sin(ground), 0.0F, std::cos(ground);
 
-  // Reconstruct XYZ directly from (range, elevation, azimuth).
+  // Reconstruct XYZ directly from (range, elevation, azimuth) using the same
+  // centred horizontal convention used while constructing the range image.
   for (int row = 0; row < s.output_rows; ++row) {
     const double elevation_deg = min_elevation + dense_step * row;
     const double elevation = deg_to_rad(elevation_deg);
@@ -196,13 +216,11 @@ Result interpolate(
       const float range = result.interpolated_ranges[index_of(row, col, result.cols)];
       if (!valid_range(range)) continue;
 
-      const double azimuth = 2.0 * pi * (static_cast<double>(col) + 0.5) /
-        static_cast<double>(result.cols);
-      const double signed_azimuth = azimuth > pi ? azimuth - 2.0 * pi : azimuth;
+      const double azimuth = column_to_azimuth(col, result.cols);
 
       if (mode == Mode::Fusion &&
-          (signed_azimuth < s.min_fov - pi / 2.0 ||
-           signed_azimuth > s.max_fov - pi / 2.0))
+          (azimuth < s.min_fov - pi / 2.0 ||
+           azimuth > s.max_fov - pi / 2.0))
         continue;
 
       const float radial = static_cast<float>(range * cos_elevation);
