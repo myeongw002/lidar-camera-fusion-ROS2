@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check startup validation and installed headless launches."""
 from pathlib import Path
+import math
 import signal
 import subprocess
 import tempfile
@@ -18,23 +19,39 @@ calibration = ['--params-file', str(share / 'config/calibration.yaml')]
 def check_calibration_regression():
     values = yaml.safe_load((share / 'config/calibration.yaml').read_text())
     matrix_file = values['/**']['ros__parameters']['matrix_file']
-    camera = matrix_file['camera_matrix']
+    intrinsics = matrix_file['camera_intrinsics']
+    distortion = matrix_file['distortion_coefficients']
     rotation = matrix_file['rlc']
     translation = matrix_file['tlc']
-    assert len(camera) == 12 and camera[10] == 1.0, 'camera projection [2,2] must be +1.0'
 
-    # lidar_camera_node now applies the supplied LiDAR->camera extrinsic directly,
+    assert len(intrinsics) == 9 and intrinsics[8] == 1.0, 'camera K[2,2] must be +1.0'
+    assert len(distortion) == 5, 'plumb_bob distortion must contain five coefficients'
+    assert intrinsics[0] > 0.0 and intrinsics[4] > 0.0, 'fx and fy must be positive'
+
+    # lidar_camera_node applies the supplied LiDAR->camera extrinsic directly,
     # with no implicit [-y, -z, x] axis remap. Test a point 10 m forward in
-    # the LiDAR frame: [10, 0, 0, 1].
+    # the LiDAR frame: [10, 0, 0].
     lidar_xyz = [10.0, 0.0, 0.0]
     camera_xyz = [
         sum(rotation[row * 3 + col] * lidar_xyz[col] for col in range(3)) + translation[row]
         for row in range(3)
     ]
-    projected = [sum(camera[row * 4 + col] * (camera_xyz + [1.0])[col]
-                     for col in range(4)) for row in range(3)]
-    assert projected[2] > 0.0, 'forward LiDAR point must have positive camera depth'
-    u, v = projected[0] / projected[2], projected[1] / projected[2]
+    assert camera_xyz[2] > 0.0, 'forward LiDAR point must have positive camera depth'
+
+    # Raw-image projection using ROS plumb_bob / Brown-Conrady distortion.
+    x = camera_xyz[0] / camera_xyz[2]
+    y = camera_xyz[1] / camera_xyz[2]
+    k1, k2, p1, p2, k3 = distortion
+    r2 = x * x + y * y
+    r4 = r2 * r2
+    r6 = r4 * r2
+    radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+    xd = x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+    yd = y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+
+    u = intrinsics[0] * xd + intrinsics[1] * yd + intrinsics[2]
+    v = intrinsics[3] * xd + intrinsics[4] * yd + intrinsics[5]
+    assert math.isfinite(u) and math.isfinite(v)
     assert 0.0 <= u < 1280.0 and 0.0 <= v < 720.0, (u, v)
 
 
@@ -64,7 +81,8 @@ cases = [
     ('lidar_camera_node', [], 'matrix_file.tlc'),
     ('lidar_camera_node', calibration + ['-p', 'matrix_file.tlc:=[0.0,1.0]'], 'exactly 3'),
     ('lidar_camera_node', calibration + ['-p', 'matrix_file.rlc:=[1.0]'], 'exactly 9'),
-    ('lidar_camera_node', calibration + ['-p', 'matrix_file.camera_matrix:=[1.0]'], 'exactly 12'),
+    ('lidar_camera_node', calibration + ['-p', 'matrix_file.camera_intrinsics:=[1.0]'], 'exactly 9'),
+    ('lidar_camera_node', calibration + ['-p', 'matrix_file.distortion_coefficients:=[0.0]'], 'exactly 5'),
 ]
 
 for executable, args, expected in cases:
