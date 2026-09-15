@@ -110,16 +110,20 @@ int main()
   const auto fusion = interpolate(scan, s, Mode::Fusion);
   require(!fusion.cloud.empty() && fusion.cloud.size() < dense.cloud.size(), "camera FOV crop");
 
-  // A depth discontinuity between adjacent raw rings must not be bridged.
+  // A depth discontinuity between adjacent raw rings must not be bridged when
+  // no nearby direction provides a consistent surface.
   auto discontinuity = scan;
   const int test_col = center_col + 20;
-  const std::size_t point_index = static_cast<std::size_t>(8 * cols + test_col);
-  const double elevation = s.vertical_angles_deg[8] * pi / 180.0;
-  const double azimuth = azimuth_for_column(test_col, cols);
-  discontinuity[point_index] = RingPoint{
-    static_cast<float>(20.0 * std::cos(elevation) * std::cos(azimuth)),
-    static_cast<float>(20.0 * std::cos(elevation) * std::sin(azimuth)),
-    static_cast<float>(20.0 * std::sin(elevation)), 8};
+  for (int offset = -3; offset <= 3; ++offset) {
+    const int col = test_col + offset;
+    const std::size_t point_index = static_cast<std::size_t>(8 * cols + col);
+    const double elevation = s.vertical_angles_deg[8] * pi / 180.0;
+    const double azimuth = azimuth_for_column(col, cols);
+    discontinuity[point_index] = RingPoint{
+      static_cast<float>(20.0 * std::cos(elevation) * std::cos(azimuth)),
+      static_cast<float>(20.0 * std::cos(elevation) * std::sin(azimuth)),
+      static_cast<float>(20.0 * std::sin(elevation)), 8};
+  }
   const auto discontinuous = interpolate(discontinuity, s, Mode::Interpolation);
   bool found_invalid_dense_cell = false;
   for (int row = 0; row < s.output_rows; ++row) {
@@ -131,6 +135,46 @@ int main()
     }
   }
   require(found_invalid_dense_cell, "range-gap boundary suppression");
+
+  // Directional interpolation should follow a diagonal surface when the
+  // vertical pair crosses a depth edge but a neighboring diagonal pair is
+  // range-consistent.
+  auto diagonal = scan;
+  const int diag_col = center_col + 40;
+  const int lower_ring = 7;
+  const int upper_ring = 8;
+  const int lower_col = diag_col - 1;
+  const int upper_col = diag_col + 1;
+
+  auto replace_point = [&](int ring, int col, double range) {
+    const std::size_t idx = static_cast<std::size_t>(ring * cols + col);
+    const double elev = s.vertical_angles_deg[ring] * pi / 180.0;
+    const double azi = azimuth_for_column(col, cols);
+    diagonal[idx] = RingPoint{
+      static_cast<float>(range * std::cos(elev) * std::cos(azi)),
+      static_cast<float>(range * std::cos(elev) * std::sin(azi)),
+      static_cast<float>(range * std::sin(elev)),
+      static_cast<std::uint16_t>(ring)};
+  };
+
+  // Force the vertical support at diag_col across a large depth jump.
+  replace_point(lower_ring, diag_col, 10.0);
+  replace_point(upper_ring, diag_col, 20.0);
+  // Provide a consistent diagonal support at 10 m.
+  replace_point(lower_ring, lower_col, 10.0);
+  replace_point(upper_ring, upper_col, 10.2);
+
+  const auto diagonal_result = interpolate(diagonal, s, Mode::Interpolation);
+  bool found_diagonal_fill = false;
+  for (int row = 0; row < s.output_rows; ++row) {
+    const float value = diagonal_result.interpolated_ranges[
+      static_cast<std::size_t>(row) * cols + diag_col];
+    if (std::isfinite(value) && value > 9.5F && value < 11.0F) {
+      found_diagonal_fill = true;
+      break;
+    }
+  }
+  require(found_diagonal_fill, "directional diagonal support");
 
   // Closest return wins when multiple points map to the same ring/azimuth cell.
   auto collision = scan;
