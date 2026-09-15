@@ -13,7 +13,6 @@ def generate_launch_description():
     arguments = [
         DeclareLaunchArgument('pcTopic', default_value='/velodyne_points'),
         DeclareLaunchArgument('interpolatedTopic', default_value='/pc_interpoled'),
-        DeclareLaunchArgument('imgTopic', default_value='/camera/color/image_raw'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('rviz', default_value='false'),
         DeclareLaunchArgument(
@@ -36,7 +35,6 @@ def generate_launch_description():
     }
     fusion_overrides = {
         'pcTopic': ParameterValue(LaunchConfiguration('interpolatedTopic'), value_type=str),
-        'imgTopic': ParameterValue(LaunchConfiguration('imgTopic'), value_type=str),
         'use_sim_time': use_sim_time,
     }
 
