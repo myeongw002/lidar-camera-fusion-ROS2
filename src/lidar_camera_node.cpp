@@ -20,6 +20,26 @@
 
 namespace lidar_camera_fusion
 {
+namespace
+{
+cv::Scalar distance_color(double range_m, double max_range_m)
+{
+  // Jet-like distance coloring:
+  // near -> blue -> cyan -> green -> yellow -> red -> far.
+  const double t = std::clamp(range_m / max_range_m, 0.0, 1.0);
+  const auto channel = [](double x) {
+    return std::clamp(1.5 - std::abs(x), 0.0, 1.0);
+  };
+
+  const double r = channel(4.0 * t - 3.0);
+  const double g = channel(4.0 * t - 2.0);
+  const double b = channel(4.0 * t - 1.0);
+
+  // OpenCV uses BGR channel order.
+  return cv::Scalar(255.0 * b, 255.0 * g, 255.0 * r);
+}
+}  // namespace
+
 class LidarCameraNode : public rclcpp::Node
 {
   using Cloud = sensor_msgs::msg::PointCloud2;
@@ -117,11 +137,9 @@ private:
           static_cast<double>(p.x) * p.x +
           static_cast<double>(p.y) * p.y +
           static_cast<double>(p.z) * p.z);
-        const int distance_color = static_cast<int>(std::clamp(
-          255.0 * range / overlay_max_range_m_, 0.0, 255.0));
         cv::circle(
           overlay, cv::Point(px, py), 1,
-          cv::Scalar(distance_color, 255 - distance_color, 255), cv::FILLED);
+          distance_color(range, overlay_max_range_m_), cv::FILLED);
       }
 
       colored.is_dense = true;
