@@ -15,6 +15,13 @@ void require(bool condition, const char * message)
   if (!condition) throw std::runtime_error(message);
 }
 
+double azimuth_for_column(int col, int cols)
+{
+  return 2.0 * pi *
+    (static_cast<double>(col) - static_cast<double>(cols / 2)) /
+    static_cast<double>(cols);
+}
+
 std::vector<RingPoint> make_synthetic_scan(const Settings & s, float range)
 {
   std::vector<RingPoint> points;
@@ -24,7 +31,7 @@ std::vector<RingPoint> make_synthetic_scan(const Settings & s, float range)
   for (int ring = 0; ring < s.input_rows; ++ring) {
     const double elevation = s.vertical_angles_deg[ring] * pi / 180.0;
     for (int col = 0; col < cols; ++col) {
-      const double azimuth = 2.0 * pi * (static_cast<double>(col) + 0.5) / cols;
+      const double azimuth = azimuth_for_column(col, cols);
       points.push_back(RingPoint{
         static_cast<float>(range * std::cos(elevation) * std::cos(azimuth)),
         static_cast<float>(range * std::cos(elevation) * std::sin(azimuth)),
@@ -71,16 +78,26 @@ int main()
     require(std::isfinite(range) && std::abs(range - 10.0) < 1e-3, "XYZ range preservation");
   }
 
+  // Horizontal range-image convention: +X / 0 deg must map exactly to W/2.
+  const int cols = s.horizontal_columns();
+  const int center_col = cols / 2;
+  std::vector<RingPoint> forward_only{
+    RingPoint{10.0F, 0.0F, 0.0F, 7}};
+  const auto centered = interpolate(forward_only, s, Mode::Interpolation);
+  require(std::isfinite(centered.raw_ranges[7u * cols + center_col]),
+    "forward +X point must land at horizontal center");
+  require(!std::isfinite(centered.raw_ranges[7u * cols]),
+    "forward +X point must not land at rear seam");
+
   const auto fusion = interpolate(scan, s, Mode::Fusion);
   require(!fusion.cloud.empty() && fusion.cloud.size() < dense.cloud.size(), "camera FOV crop");
 
   // A depth discontinuity between adjacent raw rings must not be bridged.
   auto discontinuity = scan;
-  const int test_col = 20;
-  const int cols = s.horizontal_columns();
+  const int test_col = center_col + 20;
   const std::size_t point_index = static_cast<std::size_t>(8 * cols + test_col);
   const double elevation = s.vertical_angles_deg[8] * pi / 180.0;
-  const double azimuth = 2.0 * pi * (static_cast<double>(test_col) + 0.5) / cols;
+  const double azimuth = azimuth_for_column(test_col, cols);
   discontinuity[point_index] = RingPoint{
     static_cast<float>(20.0 * std::cos(elevation) * std::cos(azimuth)),
     static_cast<float>(20.0 * std::cos(elevation) * std::sin(azimuth)),
@@ -101,8 +118,8 @@ int main()
   auto collision = scan;
   collision.push_back(RingPoint{5.0F, 0.0F, 0.0F, 7});
   const auto collided = interpolate(collision, s, Mode::Interpolation);
-  require(std::isfinite(collided.raw_ranges[7u * cols]) &&
-    collided.raw_ranges[7u * cols] < 6.0F, "nearest return per cell");
+  require(std::isfinite(collided.raw_ranges[7u * cols + center_col]) &&
+    collided.raw_ranges[7u * cols + center_col] < 6.0F, "nearest return per cell");
 
   s.ground_angle = 0.1;
   const auto rotated = interpolate(scan, s, Mode::Interpolation);
