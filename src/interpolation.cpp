@@ -3,8 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
 #include <utility>
 
@@ -118,7 +118,6 @@ Result interpolate(
 
     const std::size_t idx = index_of(static_cast<int>(p.ring), col, result.cols);
     const float range_f = static_cast<float>(range);
-    // If more than one return lands in a cell, keep the closest surface.
     if (!valid_range(result.raw_ranges[idx]) || range_f < result.raw_ranges[idx])
       result.raw_ranges[idx] = range_f;
   }
@@ -197,7 +196,6 @@ Result interpolate(
       const float range = result.interpolated_ranges[index_of(row, col, result.cols)];
       if (!valid_range(range)) continue;
 
-      // Use the centre angle of each horizontal bin.
       const double azimuth = 2.0 * pi * (static_cast<double>(col) + 0.5) /
         static_cast<double>(result.cols);
       const double signed_azimuth = azimuth > pi ? azimuth - 2.0 * pi : azimuth;
@@ -215,7 +213,7 @@ Result interpolate(
       point = ground_correction * point;
 
       if (point.allFinite())
-        result.cloud.emplace_back(point.x(), point.y(), point.z());
+        result.cloud.push_back(pcl::PointXYZ(point.x(), point.y(), point.z()));
     }
   }
 
