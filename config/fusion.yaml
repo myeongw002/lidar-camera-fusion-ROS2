@@ -3,7 +3,10 @@
     pcTopic: /pc_interpoled
     imgTopic: /camera/color/image_raw
     sync_queue_size: 10
-    overlay_max_range_m: 20.0
+
+    overlay_percentile_low: 0.05
+    overlay_percentile_high: 0.95
+    overlay_range_smoothing_alpha: 0.2
 
     output_cloud_topic: /points2
     output_image_topic: /pcOnImage_image
