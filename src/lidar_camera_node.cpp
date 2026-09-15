@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
+#include <Eigen/Core>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -85,8 +87,6 @@ private:
       for (const auto & p : dense_cloud) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
-        // Preserve the upstream LiDAR-axis to camera-axis remap before applying
-        // the calibrated LiDAR-to-camera rigid transform.
         const Eigen::Vector4f remapped(-p.y, -p.z, p.x, 1.0f);
         const Eigen::Vector3f projected = camera_ * (transform_ * remapped);
         if (!projected.allFinite() || projected.z() <= 1e-6f) continue;
