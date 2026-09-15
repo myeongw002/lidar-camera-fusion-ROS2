@@ -1,97 +1,90 @@
-# Local validation — 2026-09-15
+# Validation status — `ring-range-image`
 
-Final repository state was validated on Ubuntu 22.04.5 with ROS2 Humble,
-PCL 1.12.1, OpenCV 4.5.4, Eigen 3.4.0, and Armadillo 10.8.2. The reference
-ROS1 source is EPVelasco/lidar-camera-fusion commit
-`621de50a9e0d9c360e4ce9f84b0fc16acbcc5918`.
+This branch changes the core LiDAR representation from PCL `RangeImageSpherical` to a fixed-size range image built from `PointCloud2.ring` and azimuth. Previous validation results from `main` do **not** apply to this branch.
 
-The current and upstream YAML files both parse to this camera projection row:
-`[0.0, 0.0, 1.0, 0.0]`. The automated calibration regression check requires
-`camera_matrix[2,2] == +1.0` and verifies that a known forward LiDAR point has
-positive projected depth and lands inside the 1280×720 calibration image.
+## Intended geometry
 
-## Build and registered executables
-
-Build/install/log data was kept under `/tmp` so validation did not alter other
-packages in the surrounding workspace.
-
-```bash
-source /opt/ros/humble/setup.bash
-colcon --log-base /tmp/lidar-fusion-review/log build \
-  --base-paths /home/hrilab/ROS2/compa_ws/src/llidar_camera_fusion \
-  --build-base /tmp/lidar-fusion-review/build \
-  --install-base /tmp/lidar-fusion-review/install \
-  --symlink-install --packages-select lidar_camera_fusion \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
-source /tmp/lidar-fusion-review/install/setup.bash
-ros2 pkg executables lidar_camera_fusion
-```
-
-Result: the Release build succeeded without compiler warnings. ROS2 reported:
+Default VLP-16 configuration:
 
 ```text
-lidar_camera_fusion interpolated_node
-lidar_camera_fusion lidar_camera_node
+input_rows = 16
+output_rows = 64
+horizontal_resolution_deg = 0.2
+width = round(360 / 0.2) = 1800
 ```
 
-## Integrated tests
+Expected published range images:
+
+```text
+/range_image_raw          16 × 1800, 32FC1, metres
+/range_image_interpolated 64 × 1800, 32FC1, metres
+```
+
+Invalid cells are `NaN`.
+
+## Automated checks included in the branch
+
+The C++ interpolation test is intended to check:
+
+- fixed raw and interpolated image dimensions;
+- metric range preservation on a synthetic VLP-16 scan;
+- exactly 64 reconstructed output rows;
+- camera-FOV cropping;
+- rejection of interpolation across a configured range discontinuity;
+- nearest-return retention when points collide in one range-image cell;
+- ground correction;
+- invalid parameter rejection.
+
+The DDS smoke test is intended to check:
+
+- required `ring:uint16` input field;
+- both nodes starting without sensor data;
+- SensorDataQoS discovery;
+- `/range_image_raw` as `16 × W`, `32FC1`;
+- `/range_image_interpolated` as `64 × W`, `32FC1`;
+- `NaN` range images and empty point clouds for fully filtered input;
+- non-empty interpolated and colored clouds for a valid synthetic VLP-16 scan;
+- camera RGB sampling and overlay modification;
+- timestamp/frame propagation.
+
+The startup test is intended to check:
+
+- range-image dimensions and vertical-angle configuration;
+- invalid resolution/row/range-gap parameters;
+- camera calibration regression checks;
+- launch-file parsing and idle startup;
+- RViz plugin classes.
+
+## Commands to run on Ubuntu 22.04 / ROS2 Humble
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /tmp/lidar-fusion-review/install/setup.bash
-colcon --log-base /tmp/lidar-fusion-review/log test \
-  --build-base /tmp/lidar-fusion-review/build \
-  --install-base /tmp/lidar-fusion-review/install \
-  --packages-select lidar_camera_fusion --event-handlers console_direct+
-colcon --log-base /tmp/lidar-fusion-review/log test-result \
-  --test-result-base /tmp/lidar-fusion-review/build --verbose
+cd ~/ros2_ws
+
+colcon build --symlink-install \
+  --packages-select lidar_camera_fusion \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+source install/setup.bash
+
+colcon test --packages-select lidar_camera_fusion \
+  --event-handlers console_direct+
+colcon test-result --verbose
 ```
 
-Result: all 3 CTest entries passed (`interpolation_test`, `ros_smoke_test`, and
-`startup_test`). `colcon test-result` reported 6 tests, 0 errors, 0 failures,
-and 0 skipped. Both Python suites are registered with `ament_cmake_pytest` and
-use isolated ROS domain IDs and writable build-local ROS log directories.
-
-Coverage exercised in the final run:
-
-- spherical range-image interpolation, densification, finite/range checks,
-  FOV, ground correction, filtering, and invalid settings;
-- both nodes starting and waiting without sensor data;
-- best-effort sensor-data QoS discovery and ApproximateTime fusion;
-- empty PointCloud2 output with the LiDAR header for unusable LiDAR frames;
-- unchanged fusion image with the camera header for an unusable LiDAR frame;
-- non-empty `/pc_interpoled`, `/points2`, and modified `/pcOnImage_image` for
-  valid synthetic VLP16-like rings and a BGR camera image;
-- finite XYZ output, exact synthetic RGB sampling, and output headers;
-- 12 invalid parameter/calibration startup cases, including all array lengths;
-- `camera_matrix[2,2] == +1.0`, positive forward projection depth, and a valid
-  projected pixel;
-- all three launch files loading YAML, starting headlessly, and stopping cleanly;
-- RViz YAML parsing and Humble plugin/built-in panel class availability.
-
-## Explicit DDS smoke test
-
-The integrated DDS test passed inside `colcon test`. It was also executed
-outside the filesystem/network sandbox to allow normal loopback sockets and to
-capture its point count:
+Then explicitly inspect topics with a real VLP-16 source:
 
 ```bash
-source /tmp/lidar-fusion-review/install/setup.bash
-ROS_LOG_DIR=/tmp/lidar-fusion-review/explicit_ros_logs \
-ROS_DOMAIN_ID=189 ROS_LOCALHOST_ONLY=1 python3 test/ros_smoke_test.py
+ros2 topic echo /velodyne_points --once
+ros2 topic info /range_image_raw
+ros2 topic info /range_image_interpolated
+ros2 topic info /pc_interpoled
 ```
 
-Result: all four outputs passed; `/points2` contained 7,930 colored points.
-Headers, RGB values, overlay modification, sensor QoS, empty inputs, nonfinite
-inputs, fully filtered inputs, and empty-frame publication all passed.
+Verify the incoming cloud contains a `ring` field of type `UINT16`.
 
-## Limits
+## Current status
 
-`rosdep` is not installed in this environment, so
-`rosdep install --from-paths src --ignore-src -r -y` was not executed. The
-manifest now uses the `armadillo` rosdep key, while CMake continues to use
-`find_package(Armadillo REQUIRED)`.
+The code in this branch was written through the GitHub connector from an environment that does not contain a ROS2 Humble build/runtime installation. Therefore the branch has **not yet been independently compiled or executed in this session**.
 
-Physical sensors, visual calibration alignment, ROS1 bag replay/conversion, and
-interactive RViz rendering were not tested. Synthetic tests do not establish
-complete numerical equivalence on real sensor recordings.
+Do not treat the previous `main` branch's successful build/test numbers as validation of this redesign. Run the commands above before merging to `main`.
