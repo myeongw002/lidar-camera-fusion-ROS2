@@ -5,6 +5,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <vector>
 
 #include <Eigen/Core>
 #include <cv_bridge/cv_bridge.h>
@@ -22,11 +23,35 @@ namespace lidar_camera_fusion
 {
 namespace
 {
-cv::Scalar distance_color(double range_m, double max_range_m)
+struct ProjectedSample
+{
+  pcl::PointXYZ point;
+  int px;
+  int py;
+  double range_m;
+};
+
+double percentile_from_sorted(const std::vector<double> & values, double percentile)
+{
+  if (values.empty()) return 0.0;
+  if (values.size() == 1) return values.front();
+
+  const double position = std::clamp(percentile, 0.0, 1.0) *
+    static_cast<double>(values.size() - 1);
+  const auto lower = static_cast<std::size_t>(std::floor(position));
+  const auto upper = static_cast<std::size_t>(std::ceil(position));
+  const double alpha = position - static_cast<double>(lower);
+  return (1.0 - alpha) * values[lower] + alpha * values[upper];
+}
+
+cv::Scalar distance_color(double range_m, double min_range_m, double max_range_m)
 {
   // Jet-like distance coloring:
   // near -> blue -> cyan -> green -> yellow -> red -> far.
-  const double t = std::clamp(range_m / max_range_m, 0.0, 1.0);
+  const double span = max_range_m - min_range_m;
+  const double t = span > 1e-6 ?
+    std::clamp((range_m - min_range_m) / span, 0.0, 1.0) : 0.5;
+
   const auto channel = [](double x) {
     return std::clamp(1.5 - std::abs(x), 0.0, 1.0);
   };
@@ -66,9 +91,22 @@ public:
     if (queue <= 0 || queue > std::numeric_limits<int>::max())
       throw std::invalid_argument("sync_queue_size must be a positive int32 integer");
 
-    overlay_max_range_m_ = parameter<double>(*this, "overlay_max_range_m", 20.0);
-    if (!std::isfinite(overlay_max_range_m_) || overlay_max_range_m_ <= 0.0)
-      throw std::invalid_argument("overlay_max_range_m must be finite and > 0");
+    overlay_percentile_low_ = parameter<double>(*this, "overlay_percentile_low", 0.05);
+    overlay_percentile_high_ = parameter<double>(*this, "overlay_percentile_high", 0.95);
+    overlay_range_smoothing_alpha_ =
+      parameter<double>(*this, "overlay_range_smoothing_alpha", 0.2);
+
+    if (!std::isfinite(overlay_percentile_low_) ||
+        !std::isfinite(overlay_percentile_high_) ||
+        overlay_percentile_low_ < 0.0 || overlay_percentile_high_ > 1.0 ||
+        overlay_percentile_low_ >= overlay_percentile_high_)
+      throw std::invalid_argument(
+              "overlay percentiles must satisfy 0 <= low < high <= 1");
+
+    if (!std::isfinite(overlay_range_smoothing_alpha_) ||
+        overlay_range_smoothing_alpha_ <= 0.0 || overlay_range_smoothing_alpha_ > 1.0)
+      throw std::invalid_argument(
+              "overlay_range_smoothing_alpha must be in (0, 1]");
 
     cloud_pub_ = create_publisher<Cloud>(
       topic(*this, "output_cloud_topic", "/points2"), 1);
@@ -104,6 +142,11 @@ private:
       pcl::PointCloud<pcl::PointXYZRGB> colored;
       colored.reserve(dense_cloud.size());
 
+      std::vector<ProjectedSample> projected_samples;
+      projected_samples.reserve(dense_cloud.size());
+      std::vector<double> visible_ranges;
+      visible_ranges.reserve(dense_cloud.size());
+
       for (const auto & p : dense_cloud) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
@@ -120,26 +163,60 @@ private:
             u < 0.0f || v < 0.0f || u >= overlay.cols || v >= overlay.rows)
           continue;
 
-        const int px = static_cast<int>(u);
-        const int py = static_cast<int>(v);
-        const auto color = colors->image.at<cv::Vec3b>(py, px);
+        const double range = std::sqrt(
+          static_cast<double>(p.x) * p.x +
+          static_cast<double>(p.y) * p.y +
+          static_cast<double>(p.z) * p.z);
+        if (!std::isfinite(range)) continue;
+
+        projected_samples.push_back(ProjectedSample{
+          p, static_cast<int>(u), static_cast<int>(v), range});
+        visible_ranges.push_back(range);
+      }
+
+      if (!visible_ranges.empty()) {
+        std::sort(visible_ranges.begin(), visible_ranges.end());
+        double current_min = percentile_from_sorted(
+          visible_ranges, overlay_percentile_low_);
+        double current_max = percentile_from_sorted(
+          visible_ranges, overlay_percentile_high_);
+
+        // Avoid a degenerate color span in nearly planar/equidistant scenes.
+        if (current_max - current_min < 1e-3) {
+          const double center = 0.5 * (current_min + current_max);
+          current_min = std::max(0.0, center - 0.5);
+          current_max = center + 0.5;
+        }
+
+        if (!overlay_range_initialized_) {
+          overlay_min_range_m_ = current_min;
+          overlay_max_range_m_ = current_max;
+          overlay_range_initialized_ = true;
+        } else {
+          const double a = overlay_range_smoothing_alpha_;
+          overlay_min_range_m_ =
+            (1.0 - a) * overlay_min_range_m_ + a * current_min;
+          overlay_max_range_m_ =
+            (1.0 - a) * overlay_max_range_m_ + a * current_max;
+        }
+      }
+
+      for (const auto & sample : projected_samples) {
+        const auto color = colors->image.at<cv::Vec3b>(sample.py, sample.px);
 
         pcl::PointXYZRGB point;
-        point.x = p.x;
-        point.y = p.y;
-        point.z = p.z;
+        point.x = sample.point.x;
+        point.y = sample.point.y;
+        point.z = sample.point.z;
         point.r = color[2];
         point.g = color[1];
         point.b = color[0];
         colored.push_back(point);
 
-        const double range = std::sqrt(
-          static_cast<double>(p.x) * p.x +
-          static_cast<double>(p.y) * p.y +
-          static_cast<double>(p.z) * p.z);
         cv::circle(
-          overlay, cv::Point(px, py), 1,
-          distance_color(range, overlay_max_range_m_), cv::FILLED);
+          overlay, cv::Point(sample.px, sample.py), 1,
+          distance_color(sample.range_m, overlay_min_range_m_, overlay_max_range_m_),
+          cv::FILLED);
       }
 
       colored.is_dense = true;
@@ -152,16 +229,26 @@ private:
       cloud_pub_->publish(output);
       image_pub_->publish(*cv_bridge::CvImage(image->header, "bgr8", overlay).toImageMsg());
 
-      if (dense_cloud.empty())
+      if (dense_cloud.empty()) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000, "Interpolated LiDAR cloud is empty");
+      } else if (projected_samples.empty()) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000, "No LiDAR points project inside the camera image");
+      }
     } catch (const std::exception & e) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 5000, "Fusion processing failed: %s", e.what());
     }
   }
 
-  double overlay_max_range_m_ = 20.0;
+  double overlay_percentile_low_ = 0.05;
+  double overlay_percentile_high_ = 0.95;
+  double overlay_range_smoothing_alpha_ = 0.2;
+  bool overlay_range_initialized_ = false;
+  double overlay_min_range_m_ = 0.0;
+  double overlay_max_range_m_ = 1.0;
+
   Eigen::Matrix4f transform_;
   Eigen::Matrix<float, 3, 4> camera_;
 
