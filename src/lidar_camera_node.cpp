@@ -76,16 +76,25 @@ public:
   {
     const auto translation = calibration(*this, "matrix_file.tlc", 3);
     const auto rotation = calibration(*this, "matrix_file.rlc", 9);
-    const auto camera = calibration(*this, "matrix_file.camera_matrix", 12);
+    const auto intrinsics = calibration(*this, "matrix_file.camera_intrinsics", 9);
+    const auto distortion = calibration(*this, "matrix_file.distortion_coefficients", 5);
 
     transform_.setIdentity();
     for (int row = 0; row < 3; ++row) {
       transform_(row, 3) = static_cast<float>(translation[row]);
-      for (int col = 0; col < 3; ++col)
+      for (int col = 0; col < 3; ++col) {
         transform_(row, col) = static_cast<float>(rotation[3 * row + col]);
-      for (int col = 0; col < 4; ++col)
-        camera_(row, col) = static_cast<float>(camera[4 * row + col]);
+        camera_intrinsics_(row, col) = intrinsics[3 * row + col];
+      }
     }
+    for (int i = 0; i < 5; ++i)
+      distortion_(i) = distortion[static_cast<std::size_t>(i)];
+
+    if (!camera_intrinsics_.allFinite() ||
+        camera_intrinsics_(0, 0) <= 0.0 || camera_intrinsics_(1, 1) <= 0.0)
+      throw std::invalid_argument("camera intrinsics must be finite with fx, fy > 0");
+    if (!distortion_.allFinite())
+      throw std::invalid_argument("distortion coefficients must be finite");
 
     const auto queue = parameter<int64_t>(*this, "sync_queue_size", 10);
     if (queue <= 0 || queue > std::numeric_limits<int>::max())
@@ -122,10 +131,59 @@ public:
       &LidarCameraNode::callback, this, std::placeholders::_1, std::placeholders::_2));
 
     RCLCPP_INFO(
-      get_logger(), "Waiting for synchronized interpolated LiDAR cloud and camera image");
+      get_logger(), "Waiting for synchronized interpolated LiDAR cloud and raw camera image");
   }
 
 private:
+  bool project_to_raw_image(
+    const pcl::PointXYZ & p, int image_width, int image_height, int & px, int & py) const
+  {
+    // Direct LiDAR -> camera optical-frame transform. No implicit axis remapping.
+    const Eigen::Vector4f lidar_point(p.x, p.y, p.z, 1.0f);
+    const Eigen::Vector4f camera_point = transform_ * lidar_point;
+    if (!camera_point.allFinite() || camera_point.z() <= 1e-6f) return false;
+
+    // Normalized undistorted pinhole coordinates.
+    const double x = static_cast<double>(camera_point.x()) / camera_point.z();
+    const double y = static_cast<double>(camera_point.y()) / camera_point.z();
+    if (!std::isfinite(x) || !std::isfinite(y)) return false;
+
+    // ROS plumb_bob / Brown-Conrady model:
+    // D = [k1, k2, p1, p2, k3].
+    const double k1 = distortion_(0);
+    const double k2 = distortion_(1);
+    const double p1 = distortion_(2);
+    const double p2 = distortion_(3);
+    const double k3 = distortion_(4);
+
+    const double r2 = x * x + y * y;
+    const double r4 = r2 * r2;
+    const double r6 = r4 * r2;
+    const double radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
+    const double x_distorted =
+      x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x);
+    const double y_distorted =
+      y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
+
+    // Apply the full 3x3 intrinsic matrix K to the distorted normalized point.
+    const double u =
+      camera_intrinsics_(0, 0) * x_distorted +
+      camera_intrinsics_(0, 1) * y_distorted +
+      camera_intrinsics_(0, 2);
+    const double v =
+      camera_intrinsics_(1, 0) * x_distorted +
+      camera_intrinsics_(1, 1) * y_distorted +
+      camera_intrinsics_(1, 2);
+
+    if (!std::isfinite(u) || !std::isfinite(v) ||
+        u < 0.0 || v < 0.0 || u >= image_width || v >= image_height)
+      return false;
+
+    px = static_cast<int>(u);
+    py = static_cast<int>(v);
+    return true;
+  }
+
   void callback(const Cloud::ConstSharedPtr & cloud, const Image::ConstSharedPtr & image)
   {
     try {
@@ -150,18 +208,9 @@ private:
       for (const auto & p : dense_cloud) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
-        // The calibration extrinsic is interpreted directly as:
-        //   P_camera = T_lidar_to_camera * [x_lidar, y_lidar, z_lidar, 1]^T
-        // No implicit axis remapping is performed here.
-        const Eigen::Vector4f lidar_point(p.x, p.y, p.z, 1.0f);
-        const Eigen::Vector3f projected = camera_ * (transform_ * lidar_point);
-        if (!projected.allFinite() || projected.z() <= 1e-6f) continue;
-
-        const float u = projected.x() / projected.z();
-        const float v = projected.y() / projected.z();
-        if (!std::isfinite(u) || !std::isfinite(v) ||
-            u < 0.0f || v < 0.0f || u >= overlay.cols || v >= overlay.rows)
-          continue;
+        int px = 0;
+        int py = 0;
+        if (!project_to_raw_image(p, overlay.cols, overlay.rows, px, py)) continue;
 
         const double range = std::sqrt(
           static_cast<double>(p.x) * p.x +
@@ -169,8 +218,7 @@ private:
           static_cast<double>(p.z) * p.z);
         if (!std::isfinite(range)) continue;
 
-        projected_samples.push_back(ProjectedSample{
-          p, static_cast<int>(u), static_cast<int>(v), range});
+        projected_samples.push_back(ProjectedSample{p, px, py, range});
         visible_ranges.push_back(range);
       }
 
@@ -234,7 +282,7 @@ private:
           get_logger(), *get_clock(), 5000, "Interpolated LiDAR cloud is empty");
       } else if (projected_samples.empty()) {
         RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000, "No LiDAR points project inside the camera image");
+          get_logger(), *get_clock(), 5000, "No LiDAR points project inside the raw camera image");
       }
     } catch (const std::exception & e) {
       RCLCPP_ERROR_THROTTLE(
@@ -250,7 +298,8 @@ private:
   double overlay_max_range_m_ = 1.0;
 
   Eigen::Matrix4f transform_;
-  Eigen::Matrix<float, 3, 4> camera_;
+  Eigen::Matrix3d camera_intrinsics_ = Eigen::Matrix3d::Identity();
+  Eigen::Matrix<double, 5, 1> distortion_ = Eigen::Matrix<double, 5, 1>::Zero();
 
   rclcpp::Publisher<Cloud>::SharedPtr cloud_pub_;
   rclcpp::Publisher<Image>::SharedPtr image_pub_;
