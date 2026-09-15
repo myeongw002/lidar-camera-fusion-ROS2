@@ -22,7 +22,15 @@ def check_calibration_regression():
     rotation = matrix_file['rlc']
     translation = matrix_file['tlc']
     assert len(camera) == 12 and camera[10] == 1.0, 'camera projection [2,2] must be +1.0'
-    camera_xyz = [rotation[row * 3 + 2] * 10.0 + translation[row] for row in range(3)]
+
+    # lidar_camera_node now applies the supplied LiDAR->camera extrinsic directly,
+    # with no implicit [-y, -z, x] axis remap. Test a point 10 m forward in
+    # the LiDAR frame: [10, 0, 0, 1].
+    lidar_xyz = [10.0, 0.0, 0.0]
+    camera_xyz = [
+        sum(rotation[row * 3 + col] * lidar_xyz[col] for col in range(3)) + translation[row]
+        for row in range(3)
+    ]
     projected = [sum(camera[row * 4 + col] * (camera_xyz + [1.0])[col]
                      for col in range(4)) for row in range(3)]
     assert projected[2] > 0.0, 'forward LiDAR point must have positive camera depth'
