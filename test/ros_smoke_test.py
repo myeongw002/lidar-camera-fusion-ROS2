@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the installed fixed-ring range-image nodes over DDS."""
+"""Exercise the installed interpolation -> fusion pipeline over DDS."""
 import math
 from pathlib import Path
 import signal
@@ -35,7 +35,7 @@ def synthetic_vlp16(header, radius=10.0):
     for ring, elevation_deg in enumerate(VERTICAL_ANGLES):
         elevation = math.radians(elevation_deg)
         for azimuth_deg in range(360):
-            azimuth = math.radians(azimuth_deg + 0.5)
+            azimuth = math.radians(azimuth_deg)
             points.append((
                 radius * math.cos(elevation) * math.cos(azimuth),
                 radius * math.cos(elevation) * math.sin(azimuth),
@@ -61,16 +61,21 @@ def main():
     rclpy.init()
     node = rclpy.create_node('fusion_smoke_test')
     try:
-        for name, config in [('interpolated_node', 'interpolated'), ('lidar_camera_node', 'fusion')]:
-            command = [
-                str(executable / name), '--ros-args',
-                '--params-file', str(share / f'config/{config}.yaml')]
-            if name == 'lidar_camera_node':
-                command += ['--params-file', str(share / 'config/calibration.yaml')]
-            command += [
-                '-p', 'maxlen:=20.0',
-                '-p', 'horizontal_resolution_deg:=1.0',
-                '-p', 'max_interpolation_range_gap_m:=2.0']
+        interpolation_command = [
+            str(executable / 'interpolated_node'), '--ros-args',
+            '--params-file', str(share / 'config/interpolated.yaml'),
+            '-p', 'maxlen:=20.0',
+            '-p', 'horizontal_resolution_deg:=1.0',
+            '-p', 'max_interpolation_range_gap_m:=2.0',
+        ]
+        fusion_command = [
+            str(executable / 'lidar_camera_node'), '--ros-args',
+            '--params-file', str(share / 'config/fusion.yaml'),
+            '--params-file', str(share / 'config/calibration.yaml'),
+            '-p', 'overlay_max_range_m:=20.0',
+        ]
+
+        for command in [interpolation_command, fusion_command]:
             log = tempfile.TemporaryFile(mode='w+')
             logs.append(log)
             processes.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT))
@@ -100,7 +105,6 @@ def main():
         header = Header(frame_id='test_lidar')
         header.stamp.sec = 123
         header.stamp.nanosec = 456000
-        pc = synthetic_vlp16(header)
 
         image = Image()
         image.header.frame_id = 'test_camera'
@@ -110,12 +114,12 @@ def main():
         image.data = bytes([17, 83, 201]) * (720 * 1280)
 
         deadline = time.monotonic() + 5
-        while (pc_pub.get_subscription_count() < 2 or img_pub.get_subscription_count() < 1) and time.monotonic() < deadline:
+        while (pc_pub.get_subscription_count() < 1 or img_pub.get_subscription_count() < 1) and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)
-        assert pc_pub.get_subscription_count() == 2, 'sensor QoS/discovery mismatch'
+        assert pc_pub.get_subscription_count() == 1, 'raw LiDAR should be consumed only by interpolation node'
+        assert img_pub.get_subscription_count() == 1, 'camera QoS/discovery mismatch'
 
-        # A fully range-filtered but structurally valid ring cloud must still
-        # produce fixed-size NaN range images, empty clouds, and unchanged fusion image.
+        # Fully range-filtered input still propagates through the serial pipeline.
         messages.clear()
         counts_before = dict(message_counts)
         unusable = ring_cloud(header, [(1000.0, 0.0, 0.0, 0)])
@@ -143,7 +147,7 @@ def main():
         assert messages['/pcOnImage_image'].header == image.header
         assert bytes(messages['/pcOnImage_image'].data) == bytes(image.data)
 
-        # Valid scan. Change stamp so queued empty-frame outputs cannot satisfy assertions.
+        # Valid scan. The fusion node must consume /pc_interpoled rather than raw LiDAR.
         messages.clear()
         header.stamp.sec = 124
         image.header.stamp.sec = 124
@@ -182,7 +186,7 @@ def main():
         assert all(p.poll() is None for p in processes), 'node exited during processing'
 
         print(
-            f'DDS smoke test passed: raw={raw.height}x{raw.width}, '
+            f'DDS serial-pipeline smoke test passed: raw={raw.height}x{raw.width}, '
             f'dense={dense.height}x{dense.width}, colored={colored.width}')
     finally:
         for p in processes:
