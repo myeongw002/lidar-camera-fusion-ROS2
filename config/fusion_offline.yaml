@@ -1,7 +1,8 @@
 /**:
   ros__parameters:
     pcTopic: /pc_interpoled
-    imgTopic: /camera/color/image_raw
+    imgTopic: /camera/camera/color/image_raw
+    image_transport_mode: auto
     sync_queue_size: 10
 
     overlay_percentile_low: 0.05

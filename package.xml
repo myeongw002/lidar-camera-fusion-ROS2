@@ -12,11 +12,13 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
   <depend>message_filters</depend>
   <depend>pcl_conversions</depend>
   <depend>libpcl-all-dev</depend>
   <depend>libopencv-dev</depend>
   <depend>eigen</depend>
+  <exec_depend>compressed_image_transport</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>

@@ -2,13 +2,17 @@
 #include "node_parameters.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
 #include <cv_bridge/cv_bridge.h>
+#include <image_transport/subscriber_filter.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -23,6 +27,10 @@ namespace lidar_camera_fusion
 {
 namespace
 {
+constexpr char kRawImageType[] = "sensor_msgs/msg/Image";
+constexpr char kCompressedImageType[] = "sensor_msgs/msg/CompressedImage";
+constexpr char kCompressedSuffix[] = "/compressed";
+
 struct ProjectedSample
 {
   pcl::PointXYZ point;
@@ -30,6 +38,32 @@ struct ProjectedSample
   int py;
   double range_m;
 };
+
+bool ends_with(const std::string & value, const std::string & suffix)
+{
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string strip_compressed_suffix(const std::string & topic_name)
+{
+  if (!ends_with(topic_name, kCompressedSuffix)) return topic_name;
+  return topic_name.substr(0, topic_name.size() - std::string(kCompressedSuffix).size());
+}
+
+std::string discovery_tail(const std::string & base_topic)
+{
+  // Keep the last two path components, e.g.
+  // /camera/color/image_raw -> /color/image_raw. This lets a configuration
+  // survive namespace changes such as /camera -> /camera/camera without
+  // guessing between unrelated image streams.
+  const auto last = base_topic.find_last_of('/');
+  if (last == std::string::npos || last == 0) return base_topic;
+
+  const auto previous = base_topic.find_last_of('/', last - 1);
+  if (previous == std::string::npos) return base_topic;
+  return base_topic.substr(previous);
+}
 
 double percentile_from_sorted(const std::vector<double> & values, double percentile)
 {
@@ -70,6 +104,13 @@ class LidarCameraNode : public rclcpp::Node
   using Cloud = sensor_msgs::msg::PointCloud2;
   using Image = sensor_msgs::msg::Image;
   using Policy = message_filters::sync_policies::ApproximateTime<Cloud, Image>;
+  using TopicMap = std::map<std::string, std::vector<std::string>>;
+
+  struct ImageCandidate
+  {
+    bool raw = false;
+    bool compressed = false;
+  };
 
 public:
   LidarCameraNode() : Node("lidar_camera_node")
@@ -117,6 +158,20 @@ public:
       throw std::invalid_argument(
               "overlay_range_smoothing_alpha must be in (0, 1]");
 
+    configured_image_topic_ = topic(
+      *this, "imgTopic", "/camera/camera/color/image_raw");
+    configured_topic_is_compressed_ = ends_with(
+      configured_image_topic_, kCompressedSuffix);
+    image_base_topic_ = strip_compressed_suffix(configured_image_topic_);
+    image_transport_mode_ = parameter<std::string>(
+      *this, "image_transport_mode", "auto");
+
+    if (image_transport_mode_ != "auto" &&
+        image_transport_mode_ != "raw" &&
+        image_transport_mode_ != "compressed")
+      throw std::invalid_argument(
+              "image_transport_mode must be one of: auto, raw, compressed");
+
     cloud_pub_ = create_publisher<Cloud>(
       topic(*this, "output_cloud_topic", "/points2"), 1);
     image_pub_ = create_publisher<Image>(
@@ -124,17 +179,128 @@ public:
 
     const auto qos = rclcpp::SensorDataQoS().get_rmw_qos_profile();
     cloud_sub_.subscribe(this, topic(*this, "pcTopic", "/pc_interpoled"), qos);
-    image_sub_.subscribe(this, topic(*this, "imgTopic", "/camera/color/image_raw"), qos);
+
     sync_ = std::make_shared<message_filters::Synchronizer<Policy>>(
       Policy(static_cast<uint32_t>(queue)), cloud_sub_, image_sub_);
     sync_->registerCallback(std::bind(
       &LidarCameraNode::callback, this, std::placeholders::_1, std::placeholders::_2));
 
+    if (image_transport_mode_ == "auto") {
+      image_discovery_timer_ = create_wall_timer(
+        std::chrono::milliseconds(500),
+        std::bind(&LidarCameraNode::discover_image_transport, this));
+      discover_image_transport();
+    } else {
+      select_image_input(image_base_topic_, image_transport_mode_);
+    }
+
     RCLCPP_INFO(
-      get_logger(), "Waiting for synchronized interpolated LiDAR cloud and raw camera image");
+      get_logger(),
+      "Waiting for synchronized interpolated LiDAR cloud and camera image "
+      "(image transport: %s)",
+      image_transport_mode_.c_str());
   }
 
 private:
+  static bool topic_has_type(
+    const TopicMap & topics,
+    const std::string & topic_name,
+    const std::string & type_name)
+  {
+    const auto found = topics.find(topic_name);
+    if (found == topics.end()) return false;
+    return std::find(found->second.begin(), found->second.end(), type_name) !=
+           found->second.end();
+  }
+
+  void select_image_input(const std::string & base_topic, const std::string & transport)
+  {
+    if (image_input_selected_) return;
+
+    image_sub_.subscribe(
+      this, base_topic, transport,
+      rclcpp::SensorDataQoS().get_rmw_qos_profile());
+
+    image_input_selected_ = true;
+    image_base_topic_ = base_topic;
+    selected_image_transport_ = transport;
+    if (image_discovery_timer_) image_discovery_timer_->cancel();
+
+    const std::string subscribed_topic =
+      transport == "compressed" ? base_topic + kCompressedSuffix : base_topic;
+    RCLCPP_INFO(
+      get_logger(), "Camera image input selected: %s (%s transport)",
+      subscribed_topic.c_str(), transport.c_str());
+  }
+
+  void discover_image_transport()
+  {
+    if (image_input_selected_) return;
+
+    const auto topics = get_topic_names_and_types();
+
+    const bool exact_raw = topic_has_type(topics, image_base_topic_, kRawImageType);
+    const bool exact_compressed = topic_has_type(
+      topics, image_base_topic_ + kCompressedSuffix, kCompressedImageType);
+
+    // If the user explicitly supplied a /compressed topic, preserve that intent.
+    // Otherwise raw wins when both transports are available, which is preferable
+    // for the live single-machine pipeline.
+    if (configured_topic_is_compressed_ && exact_compressed) {
+      select_image_input(image_base_topic_, "compressed");
+      return;
+    }
+    if (exact_raw) {
+      select_image_input(image_base_topic_, "raw");
+      return;
+    }
+    if (exact_compressed) {
+      select_image_input(image_base_topic_, "compressed");
+      return;
+    }
+
+    // The configured namespace may differ from the running RealSense namespace
+    // (for example /camera/color/image_raw vs /camera/camera/color/image_raw).
+    // Search by the final two path components, but only auto-select when exactly
+    // one base image stream matches so that we never guess between cameras.
+    const std::string tail = discovery_tail(image_base_topic_);
+    std::map<std::string, ImageCandidate> candidates;
+    for (const auto & item : topics) {
+      const auto & name = item.first;
+      const auto & types = item.second;
+
+      if (ends_with(name, tail) &&
+          std::find(types.begin(), types.end(), kRawImageType) != types.end()) {
+        candidates[name].raw = true;
+      }
+
+      const std::string compressed_tail = tail + kCompressedSuffix;
+      if (ends_with(name, compressed_tail) &&
+          std::find(types.begin(), types.end(), kCompressedImageType) != types.end()) {
+        candidates[strip_compressed_suffix(name)].compressed = true;
+      }
+    }
+
+    if (candidates.size() == 1) {
+      const auto & candidate = *candidates.begin();
+      if (configured_topic_is_compressed_ && candidate.second.compressed) {
+        select_image_input(candidate.first, "compressed");
+      } else if (candidate.second.raw) {
+        select_image_input(candidate.first, "raw");
+      } else if (candidate.second.compressed) {
+        select_image_input(candidate.first, "compressed");
+      }
+      return;
+    }
+
+    if (candidates.size() > 1) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Multiple camera image streams match '%s'; set imgTopic more specifically",
+        tail.c_str());
+    }
+  }
+
   bool project_to_raw_image(
     const pcl::PointXYZ & p, int image_width, int image_height, int & px, int & py) const
   {
@@ -313,6 +479,13 @@ private:
   double overlay_min_range_m_ = 0.0;
   double overlay_max_range_m_ = 1.0;
 
+  std::string configured_image_topic_;
+  std::string image_base_topic_;
+  std::string image_transport_mode_ = "auto";
+  std::string selected_image_transport_;
+  bool configured_topic_is_compressed_ = false;
+  bool image_input_selected_ = false;
+
   Eigen::Matrix4f transform_;
   Eigen::Matrix3d camera_intrinsics_ = Eigen::Matrix3d::Identity();
   Eigen::Matrix<double, 5, 1> distortion_ = Eigen::Matrix<double, 5, 1>::Zero();
@@ -320,8 +493,9 @@ private:
   rclcpp::Publisher<Cloud>::SharedPtr cloud_pub_;
   rclcpp::Publisher<Image>::SharedPtr image_pub_;
   message_filters::Subscriber<Cloud> cloud_sub_;
-  message_filters::Subscriber<Image> image_sub_;
+  image_transport::SubscriberFilter image_sub_;
   std::shared_ptr<message_filters::Synchronizer<Policy>> sync_;
+  rclcpp::TimerBase::SharedPtr image_discovery_timer_;
 };
 }  // namespace lidar_camera_fusion
 
