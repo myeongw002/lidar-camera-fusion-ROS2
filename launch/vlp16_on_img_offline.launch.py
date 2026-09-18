@@ -36,6 +36,7 @@ def generate_launch_description():
     }
     fusion_overrides = {
         'pcTopic': ParameterValue(LaunchConfiguration('interpolatedTopic'), value_type=str),
+        'rawPcTopic': ParameterValue(LaunchConfiguration('pcTopic'), value_type=str),
         'use_sim_time': use_sim_time,
     }
 
