@@ -39,6 +39,13 @@ struct ProjectedSample
   double range_m;
 };
 
+struct OverlayRangeState
+{
+  bool initialized = false;
+  double min_range_m = 0.0;
+  double max_range_m = 1.0;
+};
+
 bool ends_with(const std::string & value, const std::string & suffix)
 {
   return value.size() >= suffix.size() &&
@@ -176,14 +183,24 @@ public:
       topic(*this, "output_cloud_topic", "/points2"), 1);
     image_pub_ = create_publisher<Image>(
       topic(*this, "output_image_topic", "/pcOnImage_image"), 1);
+    raw_image_pub_ = create_publisher<Image>(
+      topic(*this, "output_raw_image_topic", "/pcOnImage_raw_image"), 1);
 
     const auto qos = rclcpp::SensorDataQoS().get_rmw_qos_profile();
     cloud_sub_.subscribe(this, topic(*this, "pcTopic", "/pc_interpoled"), qos);
+    raw_cloud_sub_.subscribe(this, topic(*this, "rawPcTopic", "/velodyne_points"), qos);
 
     sync_ = std::make_shared<message_filters::Synchronizer<Policy>>(
       Policy(static_cast<uint32_t>(queue)), cloud_sub_, image_sub_);
     sync_->registerCallback(std::bind(
-      &LidarCameraNode::callback, this, std::placeholders::_1, std::placeholders::_2));
+      &LidarCameraNode::interpolated_callback, this,
+      std::placeholders::_1, std::placeholders::_2));
+
+    raw_sync_ = std::make_shared<message_filters::Synchronizer<Policy>>(
+      Policy(static_cast<uint32_t>(queue)), raw_cloud_sub_, image_sub_);
+    raw_sync_->registerCallback(std::bind(
+      &LidarCameraNode::raw_callback, this,
+      std::placeholders::_1, std::placeholders::_2));
 
     if (image_transport_mode_ == "auto") {
       image_discovery_timer_ = create_wall_timer(
@@ -196,7 +213,7 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Waiting for synchronized interpolated LiDAR cloud and camera image "
+      "Waiting for synchronized interpolated/raw LiDAR clouds and camera image "
       "(image transport: %s)",
       image_transport_mode_.c_str());
   }
@@ -366,7 +383,27 @@ private:
     return true;
   }
 
-  void callback(const Cloud::ConstSharedPtr & cloud, const Image::ConstSharedPtr & image)
+  void interpolated_callback(
+    const Cloud::ConstSharedPtr & cloud, const Image::ConstSharedPtr & image)
+  {
+    process_projection(
+      cloud, image, image_pub_, interpolated_range_state_, true, "Interpolated");
+  }
+
+  void raw_callback(
+    const Cloud::ConstSharedPtr & cloud, const Image::ConstSharedPtr & image)
+  {
+    process_projection(
+      cloud, image, raw_image_pub_, raw_range_state_, false, "Raw");
+  }
+
+  void process_projection(
+    const Cloud::ConstSharedPtr & cloud,
+    const Image::ConstSharedPtr & image,
+    const rclcpp::Publisher<Image>::SharedPtr & overlay_pub,
+    OverlayRangeState & range_state,
+    bool publish_colored_cloud,
+    const char * stream_name)
   {
     try {
       const auto colors = cv_bridge::toCvCopy(image, "bgr8");
@@ -375,19 +412,21 @@ private:
         return;
       }
 
-      pcl::PointCloud<pcl::PointXYZ> dense_cloud;
-      pcl::fromROSMsg(*cloud, dense_cloud);
+      pcl::PointCloud<pcl::PointXYZ> lidar_cloud;
+      pcl::fromROSMsg(*cloud, lidar_cloud);
 
       cv::Mat overlay = colors->image.clone();
       pcl::PointCloud<pcl::PointXYZRGB> colored;
-      colored.reserve(dense_cloud.size());
+      if (publish_colored_cloud) {
+        colored.reserve(lidar_cloud.size());
+      }
 
       std::vector<ProjectedSample> projected_samples;
-      projected_samples.reserve(dense_cloud.size());
+      projected_samples.reserve(lidar_cloud.size());
       std::vector<double> visible_ranges;
-      visible_ranges.reserve(dense_cloud.size());
+      visible_ranges.reserve(lidar_cloud.size());
 
-      for (const auto & p : dense_cloud) {
+      for (const auto & p : lidar_cloud) {
         if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
 
         int px = 0;
@@ -418,66 +457,74 @@ private:
           current_max = center + 0.5;
         }
 
-        if (!overlay_range_initialized_) {
-          overlay_min_range_m_ = current_min;
-          overlay_max_range_m_ = current_max;
-          overlay_range_initialized_ = true;
+        if (!range_state.initialized) {
+          range_state.min_range_m = current_min;
+          range_state.max_range_m = current_max;
+          range_state.initialized = true;
         } else {
           const double a = overlay_range_smoothing_alpha_;
-          overlay_min_range_m_ =
-            (1.0 - a) * overlay_min_range_m_ + a * current_min;
-          overlay_max_range_m_ =
-            (1.0 - a) * overlay_max_range_m_ + a * current_max;
+          range_state.min_range_m =
+            (1.0 - a) * range_state.min_range_m + a * current_min;
+          range_state.max_range_m =
+            (1.0 - a) * range_state.max_range_m + a * current_max;
         }
       }
 
       for (const auto & sample : projected_samples) {
-        const auto color = colors->image.at<cv::Vec3b>(sample.py, sample.px);
+        if (publish_colored_cloud) {
+          const auto color = colors->image.at<cv::Vec3b>(sample.py, sample.px);
 
-        pcl::PointXYZRGB point;
-        point.x = sample.point.x;
-        point.y = sample.point.y;
-        point.z = sample.point.z;
-        point.r = color[2];
-        point.g = color[1];
-        point.b = color[0];
-        colored.push_back(point);
+          pcl::PointXYZRGB point;
+          point.x = sample.point.x;
+          point.y = sample.point.y;
+          point.z = sample.point.z;
+          point.r = color[2];
+          point.g = color[1];
+          point.b = color[0];
+          colored.push_back(point);
+        }
 
         cv::circle(
           overlay, cv::Point(sample.px, sample.py), 1,
-          distance_color(sample.range_m, overlay_min_range_m_, overlay_max_range_m_),
+          distance_color(
+            sample.range_m, range_state.min_range_m, range_state.max_range_m),
           cv::FILLED);
       }
 
-      colored.is_dense = true;
-      colored.height = 1;
-      colored.width = static_cast<uint32_t>(colored.size());
+      if (publish_colored_cloud) {
+        colored.is_dense = true;
+        colored.height = 1;
+        colored.width = static_cast<uint32_t>(colored.size());
 
-      Cloud output;
-      pcl::toROSMsg(colored, output);
-      output.header = cloud->header;
-      cloud_pub_->publish(output);
-      image_pub_->publish(*cv_bridge::CvImage(image->header, "bgr8", overlay).toImageMsg());
+        Cloud output;
+        pcl::toROSMsg(colored, output);
+        output.header = cloud->header;
+        cloud_pub_->publish(output);
+      }
 
-      if (dense_cloud.empty()) {
+      overlay_pub->publish(
+        *cv_bridge::CvImage(image->header, "bgr8", overlay).toImageMsg());
+
+      if (lidar_cloud.empty()) {
         RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000, "Interpolated LiDAR cloud is empty");
+          get_logger(), *get_clock(), 5000, "%s LiDAR cloud is empty", stream_name);
       } else if (projected_samples.empty()) {
         RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000, "No LiDAR points project inside the raw camera image");
+          get_logger(), *get_clock(), 5000,
+          "No %s LiDAR points project inside the raw camera image", stream_name);
       }
     } catch (const std::exception & e) {
       RCLCPP_ERROR_THROTTLE(
-        get_logger(), *get_clock(), 5000, "Fusion processing failed: %s", e.what());
+        get_logger(), *get_clock(), 5000,
+        "%s fusion processing failed: %s", stream_name, e.what());
     }
   }
 
   double overlay_percentile_low_ = 0.05;
   double overlay_percentile_high_ = 0.95;
   double overlay_range_smoothing_alpha_ = 0.2;
-  bool overlay_range_initialized_ = false;
-  double overlay_min_range_m_ = 0.0;
-  double overlay_max_range_m_ = 1.0;
+  OverlayRangeState interpolated_range_state_;
+  OverlayRangeState raw_range_state_;
 
   std::string configured_image_topic_;
   std::string image_base_topic_;
@@ -492,9 +539,12 @@ private:
 
   rclcpp::Publisher<Cloud>::SharedPtr cloud_pub_;
   rclcpp::Publisher<Image>::SharedPtr image_pub_;
+  rclcpp::Publisher<Image>::SharedPtr raw_image_pub_;
   message_filters::Subscriber<Cloud> cloud_sub_;
+  message_filters::Subscriber<Cloud> raw_cloud_sub_;
   image_transport::SubscriberFilter image_sub_;
   std::shared_ptr<message_filters::Synchronizer<Policy>> sync_;
+  std::shared_ptr<message_filters::Synchronizer<Policy>> raw_sync_;
   rclcpp::TimerBase::SharedPtr image_discovery_timer_;
 };
 }  // namespace lidar_camera_fusion
