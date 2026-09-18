@@ -92,6 +92,7 @@ def main():
             ('/range_image_interpolated', Image),
             ('/points2', PointCloud2),
             ('/pcOnImage_image', Image),
+            ('/pcOnImage_raw_image', Image),
         ]
         for topic, kind in topics:
             def receive(msg, t=topic):
@@ -124,7 +125,7 @@ def main():
         counts_before = dict(message_counts)
         unusable = ring_cloud(header, [(1000.0, 0.0, 0.0, 0)])
         required = ['/pc_interpoled', '/range_image_raw', '/range_image_interpolated',
-                    '/points2', '/pcOnImage_image']
+                    '/points2', '/pcOnImage_image', '/pcOnImage_raw_image']
         deadline = time.monotonic() + 5
         while any(message_counts.get(t, 0) == counts_before.get(t, 0) for t in required) and time.monotonic() < deadline:
             pc_pub.publish(unusable)
@@ -145,7 +146,9 @@ def main():
         assert messages['/pc_interpoled'].header == header
         assert messages['/points2'].header == header
         assert messages['/pcOnImage_image'].header == image.header
+        assert messages['/pcOnImage_raw_image'].header == image.header
         assert bytes(messages['/pcOnImage_image'].data) == bytes(image.data)
+        assert bytes(messages['/pcOnImage_raw_image'].data) == bytes(image.data)
 
         # Valid scan. The fusion node must consume /pc_interpoled rather than raw LiDAR.
         messages.clear()
@@ -163,6 +166,7 @@ def main():
         for topic in ['/pc_interpoled', '/range_image_raw', '/range_image_interpolated', '/points2']:
             assert messages[topic].header == header, f'wrong LiDAR header: {topic}'
         assert messages['/pcOnImage_image'].header == image.header
+        assert messages['/pcOnImage_raw_image'].header == image.header
 
         raw = messages['/range_image_raw']
         dense = messages['/range_image_interpolated']
@@ -182,7 +186,8 @@ def main():
         rgb_field = next(f for f in colored.fields if f.name == 'rgb')
         packed = struct.unpack_from('>I' if colored.is_bigendian else '<I', colored.data, rgb_field.offset)[0]
         assert packed & 0xFFFFFF == (201 << 16 | 83 << 8 | 17), 'wrong RGB sampling'
-        assert bytes(messages['/pcOnImage_image'].data) != bytes(image.data), 'overlay unchanged'
+        assert bytes(messages['/pcOnImage_image'].data) != bytes(image.data), 'interpolated overlay unchanged'
+        assert bytes(messages['/pcOnImage_raw_image'].data) != bytes(image.data), 'raw overlay unchanged'
         assert all(p.poll() is None for p in processes), 'node exited during processing'
 
         print(
