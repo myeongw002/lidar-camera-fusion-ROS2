@@ -2,6 +2,7 @@
 #include "interpolation.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <chrono>
 #include <iterator>
@@ -17,7 +18,18 @@ namespace
 {
 constexpr float nan_f = std::numeric_limits<float>::quiet_NaN();
 constexpr int directional_search_radius_cols = 3;
+constexpr int directional_candidate_count = 2 * directional_search_radius_cols + 1;
 constexpr double directional_offset_penalty_m = 0.05;
+
+struct RowInterpolationInfo
+{
+  int lower_row = -1;
+  int upper_row = -1;
+  bool same_ring = false;
+  double alpha = 0.0;
+  std::array<int, directional_candidate_count> lower_offsets{};
+  std::array<int, directional_candidate_count> upper_offsets{};
+};
 
 inline std::size_t index_of(int row, int col, int cols)
 {
@@ -190,12 +202,12 @@ Result interpolate(
   const double dense_step = (max_elevation - min_elevation) /
     static_cast<double>(s.output_rows - 1);
 
-  // Directional edge-aware vertical interpolation. For a target cell between
-  // two physical rings, evaluate the vertical support and a small set of
-  // diagonal supports. The candidate with the smallest range discontinuity is
-  // selected, with a small penalty for horizontal displacement so that smooth
-  // interior surfaces still prefer the vertical direction. Candidates that
-  // cross a depth jump larger than max_interpolation_range_gap_m are rejected.
+  // Directional edge-aware vertical interpolation. All geometry that depends
+  // only on the output row is precomputed once per frame. In particular, the
+  // support rows, interpolation fraction, and rounded directional column
+  // offsets do not depend on the horizontal column and should not be recomputed
+  // for every candidate cell.
+  std::vector<RowInterpolationInfo> row_info(static_cast<std::size_t>(s.output_rows));
   for (int out_row = 0; out_row < s.output_rows; ++out_row) {
     const double target_elevation = max_elevation - dense_step * out_row;
 
@@ -220,14 +232,37 @@ Result interpolate(
       alpha = (target_elevation - lower->first) / (upper->first - lower->first);
     }
 
-    const int lower_row = ring_to_image_row[static_cast<std::size_t>(lower_ring)];
-    const int upper_row = ring_to_image_row[static_cast<std::size_t>(upper_ring)];
+    auto & info = row_info[static_cast<std::size_t>(out_row)];
+    info.lower_row = ring_to_image_row[static_cast<std::size_t>(lower_ring)];
+    info.upper_row = ring_to_image_row[static_cast<std::size_t>(upper_ring)];
+    info.same_ring = lower_ring == upper_ring;
+    info.alpha = alpha;
+
+    for (int direction = -directional_search_radius_cols;
+      direction <= directional_search_radius_cols; ++direction)
+    {
+      const std::size_t candidate = static_cast<std::size_t>(
+        direction + directional_search_radius_cols);
+      info.lower_offsets[candidate] =
+        static_cast<int>(std::lround(alpha * direction));
+      info.upper_offsets[candidate] =
+        static_cast<int>(std::lround((1.0 - alpha) * direction));
+    }
+  }
+
+  // For a target cell between two physical rings, evaluate the vertical
+  // support and a small set of diagonal supports. The candidate with the
+  // smallest range discontinuity is selected, with a small penalty for
+  // horizontal displacement so smooth interior surfaces still prefer the
+  // vertical direction. Candidates crossing a large depth jump are rejected.
+  for (int out_row = 0; out_row < s.output_rows; ++out_row) {
+    const auto & info = row_info[static_cast<std::size_t>(out_row)];
 
     for (int col = 0; col < result.cols; ++col) {
       float dense = nan_f;
 
-      if (lower_ring == upper_ring) {
-        const float raw = result.raw_ranges[index_of(lower_row, col, result.cols)];
+      if (info.same_ring) {
+        const float raw = result.raw_ranges[index_of(info.lower_row, col, result.cols)];
         if (valid_range(raw)) dense = raw;
       } else {
         double best_score = std::numeric_limits<double>::infinity();
@@ -235,15 +270,17 @@ Result interpolate(
         for (int direction = -directional_search_radius_cols;
           direction <= directional_search_radius_cols; ++direction)
         {
-          // Choose integer support columns that approximate a line passing
-          // through the target column at interpolation fraction alpha.
+          const std::size_t candidate = static_cast<std::size_t>(
+            direction + directional_search_radius_cols);
           const int lower_col = wrap_column(
-            col - static_cast<int>(std::lround(alpha * direction)), result.cols);
+            col - info.lower_offsets[candidate], result.cols);
           const int upper_col = wrap_column(
-            col + static_cast<int>(std::lround((1.0 - alpha) * direction)), result.cols);
+            col + info.upper_offsets[candidate], result.cols);
 
-          const float r0 = result.raw_ranges[index_of(lower_row, lower_col, result.cols)];
-          const float r1 = result.raw_ranges[index_of(upper_row, upper_col, result.cols)];
+          const float r0 =
+            result.raw_ranges[index_of(info.lower_row, lower_col, result.cols)];
+          const float r1 =
+            result.raw_ranges[index_of(info.upper_row, upper_col, result.cols)];
           if (!valid_range(r0) || !valid_range(r1)) continue;
 
           const double gap = std::abs(static_cast<double>(r1) - r0);
@@ -253,7 +290,8 @@ Result interpolate(
             directional_offset_penalty_m * static_cast<double>(std::abs(direction));
           if (score < best_score) {
             best_score = score;
-            dense = static_cast<float>((1.0 - alpha) * r0 + alpha * r1);
+            dense = static_cast<float>(
+              (1.0 - info.alpha) * r0 + info.alpha * r1);
           }
         }
       }
