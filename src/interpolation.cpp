@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -39,6 +40,15 @@ inline bool valid_range(float value)
 inline double deg_to_rad(double degrees)
 {
   return degrees * pi / 180.0;
+}
+
+using SteadyClock = std::chrono::steady_clock;
+
+inline double elapsed_ms(
+  const SteadyClock::time_point & begin,
+  const SteadyClock::time_point & end)
+{
+  return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
 // Horizontal convention:
@@ -116,6 +126,7 @@ Result interpolate(
   const Settings & s,
   Mode mode)
 {
+  const auto total_begin = SteadyClock::now();
   s.validate();
 
   Result result;
@@ -145,8 +156,12 @@ Result interpolate(
     ring_to_image_row[static_cast<std::size_t>(ring)] = image_row;
   }
 
+  const auto setup_end = SteadyClock::now();
+  result.timing.setup_ms = elapsed_ms(total_begin, setup_end);
+
   // Build a fixed HxW raw range image directly from ring and azimuth.
   // Horizontal centre is forward +X; vertical top is the highest laser ring.
+  const auto raw_begin = SteadyClock::now();
   for (const auto & p : input) {
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
     if (p.ring >= static_cast<std::uint16_t>(s.input_rows)) continue;
@@ -166,7 +181,10 @@ Result interpolate(
     if (!valid_range(result.raw_ranges[idx]) || range_f < result.raw_ranges[idx])
       result.raw_ranges[idx] = range_f;
   }
+  const auto raw_end = SteadyClock::now();
+  result.timing.raw_range_ms = elapsed_ms(raw_begin, raw_end);
 
+  const auto interpolation_begin = SteadyClock::now();
   const double min_elevation = rings_ascending.front().first;
   const double max_elevation = rings_ascending.back().first;
   const double dense_step = (max_elevation - min_elevation) /
@@ -243,7 +261,11 @@ Result interpolate(
       result.interpolated_ranges[index_of(out_row, col, result.cols)] = dense;
     }
   }
+  const auto interpolation_end = SteadyClock::now();
+  result.timing.directional_interpolation_ms =
+    elapsed_ms(interpolation_begin, interpolation_end);
 
+  const auto xyz_begin = SteadyClock::now();
   const float ground = static_cast<float>(s.ground_angle);
   Eigen::Matrix3f ground_correction;
   ground_correction <<
@@ -284,6 +306,10 @@ Result interpolate(
   result.cloud.is_dense = true;
   result.cloud.height = 1;
   result.cloud.width = static_cast<std::uint32_t>(result.cloud.size());
+
+  const auto xyz_end = SteadyClock::now();
+  result.timing.xyz_reconstruction_ms = elapsed_ms(xyz_begin, xyz_end);
+  result.timing.total_ms = elapsed_ms(total_begin, xyz_end);
   return result;
 }
 
