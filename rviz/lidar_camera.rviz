@@ -48,10 +48,19 @@ Visualization Manager:
       History Policy: Keep Last
       Depth: 5
   - Class: rviz_default_plugins/Image
-    Name: Projected LiDAR
+    Name: Interpolated LiDAR projection
     Enabled: true
     Topic:
       Value: /pcOnImage_image
+      Reliability Policy: Reliable
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Depth: 5
+  - Class: rviz_default_plugins/Image
+    Name: Original LiDAR projection
+    Enabled: true
+    Topic:
+      Value: /pcOnImage_raw_image
       Reliability Policy: Reliable
       Durability Policy: Volatile
       History Policy: Keep Last
