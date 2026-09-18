@@ -1,4 +1,4 @@
-// Native ROS2 Humble LiDAR-camera fusion consuming the interpolated cloud.
+// Native ROS2 Humble LiDAR-camera fusion publishing raw and interpolated overlays.
 #include "node_parameters.hpp"
 
 #include <algorithm>
