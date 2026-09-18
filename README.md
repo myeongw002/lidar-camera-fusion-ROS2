@@ -101,8 +101,9 @@ Outputs:
 
 - `/range_image_raw` — `Image`, `32FC1`
 - `/range_image_interpolated` — `Image`, `32FC1`
-- `/points2` — camera-colored `PointCloud2`
-- `/pcOnImage_image` — projected camera overlay
+- `/points2` — camera-colored interpolated `PointCloud2`
+- `/pcOnImage_image` — interpolated-cloud projection overlay
+- `/pcOnImage_raw_image` — original VLP-16 projection overlay
 
 Topic names are configurable in the YAML files.
 
