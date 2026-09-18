@@ -39,6 +39,13 @@ inline std::size_t index_of(int row, int col, int cols)
 
 inline int wrap_column(int col, int cols)
 {
+  // Directional interpolation shifts a valid column by only a few bins.
+  // Handle the common single-wrap case without integer modulo; keep a
+  // fallback so the helper remains correct even for unusually small widths.
+  if (col >= 0 && col < cols) return col;
+  if (col < 0 && col >= -cols) return col + cols;
+  if (col >= cols && col < 2 * cols) return col - cols;
+
   col %= cols;
   if (col < 0) col += cols;
   return col;
