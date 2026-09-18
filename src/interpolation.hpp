@@ -49,6 +49,15 @@ struct Settings
 
 enum class Mode { Interpolation, Fusion };
 
+struct Timing
+{
+  double setup_ms = 0.0;
+  double raw_range_ms = 0.0;
+  double directional_interpolation_ms = 0.0;
+  double xyz_reconstruction_ms = 0.0;
+  double total_ms = 0.0;
+};
+
 struct Result
 {
   int raw_rows = 0;
@@ -60,6 +69,7 @@ struct Result
   std::vector<float> interpolated_ranges;
 
   pcl::PointCloud<pcl::PointXYZ> cloud;
+  Timing timing;
 };
 
 Result interpolate(
